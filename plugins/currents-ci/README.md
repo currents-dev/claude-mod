@@ -121,7 +121,8 @@ latest pull requests.
 ## Requirements
 
 - Claude Code 2.1.287 or later in the terminal, or the Desktop app with 2.1.286
-  or later.
+  or later. Tested with Claude Code 2.1.310 in the terminal and 2.1.295 in the
+  Desktop app's Code tab. Mods' events and methods can change between releases.
 - `git`. The GitHub CLI is optional.
 
 ## Develop

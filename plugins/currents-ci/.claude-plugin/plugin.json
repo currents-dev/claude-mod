@@ -1,5 +1,6 @@
 {
   "name": "currents-ci",
+  "displayName": "Currents",
   "version": "1.0.0",
   "description": "Currents test runs in Claude Code: a live status band for your branch and PRs, and a drawer with the run's results, errors and spec files.",
   "author": {

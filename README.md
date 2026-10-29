@@ -61,6 +61,19 @@ Once Claude Code has loaded the plugin, it lays its API types in
 `npx tsc -p plugins/currents-ci` type-checks it. CI runs the validation and the
 tests on every push and pull request.
 
+## Release
+
+- Bump `version` in `plugins/currents-ci/.claude-plugin/plugin.json` and in
+  `.claude-plugin/marketplace.json` for every release. With an unchanged
+  version, `claude plugin update` keeps users on the copy they have.
+- Never rename the plugin: installs are recorded as `currents-ci@currents`.
+- The plugin points its MCP server at the same URL as the Currents connector
+  (`https://mcp.currents.dev/mcp`), so someone with both sees one set of tools.
+  In the [developer portal](https://claude.ai/directory/manage), submit this
+  repository's `plugins/currents-ci` as a plugin bundle from the Currents
+  organization and pair it with the Currents connector. Once listed, merging
+  to `main` publishes each new version after the directory's scan.
+
 ## License
 
 Apache-2.0
