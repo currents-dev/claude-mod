@@ -132,20 +132,26 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
     case 'checking':
       return null
     case 'missing': {
-      const text: Seg =
+      // The first part stays, cut short if it must; the hint goes first when there is no room.
+      const text: Seg[] =
         c.message !== null
-          ? { text: ` · ${c.message}`, color: 'warning', drop: 1 }
-          : { text: ' · Sign in to see the test runs of your branch and pull requests here', dim: true, drop: 1 }
+          ? [{ text: ` · ${c.message}`, color: 'warning' }]
+          : c.server !== null
+            ? [
+                { text: ' · Sign in to see your test runs', dim: true },
+                { text: ' · signed in already? Reconnect currents in /mcp', dim: true, drop: 1 },
+              ]
+            : [{ text: ' · Connect Currents to see your test runs', dim: true }]
       // The plugin's own server signs in inside this session; without one, the connector is the way in.
       return c.server !== null
-        ? row([brand, text], {
+        ? row([brand, ...text], {
             labels: ['Sign in', 'Setup'],
             nodes: [
               <Button key="sign-in" variant="primary" label="Sign in" onPress={press => actions.signIn(press.surface)} />,
               <Button key="setup" label="Setup" onPress={actions.open} />,
             ],
           })
-        : row([brand, text], {
+        : row([brand, ...text], {
             labels: ['Add to Claude ↗', 'Setup'],
             nodes: [
               <ui.Link href={CLAUDE_DIRECTORY} label="Add to Claude ↗" />,
@@ -160,7 +166,7 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
   if (s.project === null) {
     if (s.updatedAt === null) return row([brand, { text: ' · loading…', dim: true }], { labels: [], nodes: [] })
     const ask = s.repo === null ? ' · Choose your Currents project' : ' · Choose the Currents project this repository records to'
-    return row([brand, { text: ask, dim: true, drop: 1 }], {
+    return row([brand, { text: ask, dim: true }], {
       labels: ['Choose'],
       nodes: [
         <Button
@@ -176,7 +182,7 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
   }
 
   if (s.error !== null && s.updatedAt === null) {
-    return row([brand, { text: ` · ${s.error}`, color: 'warning', drop: 1 }], {
+    return row([brand, { text: ` · ${s.error}`, color: 'warning' }], {
       labels: ['Retry'],
       nodes: [<Button key="retry" label="Retry" onPress={actions.retry} />],
     })
@@ -318,7 +324,7 @@ const drawConnect = (ui: Ui, s: Snapshot, surface: RenderSurface, actions: Actio
         <Box flexDirection="column">
           <Text>
             <Text bold>Sign in here. </Text>
-            {`${how} Choose ${server}, sign in with your Currents account, and pick the organization. This drawer fills in within 20 seconds.`}
+            {`${how} Choose ${server}, sign in with your Currents account, and pick the organization. This drawer fills in within 20 seconds. Already signed in, and ${server} shows Reconnect there? Press it.`}
           </Text>
           <Box marginTop={1}>
             <Button key="sign-in" variant="primary" autoFocus label="Sign in" onPress={press => actions.signIn(press.surface)} />

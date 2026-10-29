@@ -231,9 +231,16 @@ test("signed out, Sign in opens this session's MCP servers, and the band fills i
   const w = world(on, { connector: false })
   await start($)
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await band.find({ type: 'Text', text: /Sign in to see the test runs/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /Sign in to see your test runs/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /Reconnect currents in \/mcp/ })).toBeDefined()
   await band.press({ key: 'sign-in' })
   expect(w.filled).toEqual(['/mcp'])
+
+  // A narrow band keeps what to do and lets the hint go.
+  const narrow = await $.ui.mount({ ...BAND, surface: 'desktop', props: { ...BAND.props, bodyColumns: 64 } })
+  expect(await narrow.find({ type: 'Text', text: /Sign in to see your test runs/ })).toBeDefined()
+  expect(await narrow.find({ type: 'Text', text: /Reconnect currents/ })).toBeUndefined()
+  await narrow.unmount()
 
   w.ownSignedIn = true
   await band.press({ key: 'setup' })
