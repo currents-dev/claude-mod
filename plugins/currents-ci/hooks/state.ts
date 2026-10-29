@@ -22,6 +22,9 @@ export const EMPTY: Snapshot = {
   error: null,
 }
 
+/** A snapshot an earlier version saved lacks the fields added since: fill them in. */
+export const normalize = (s: Snapshot): Snapshot => ({ ...EMPTY, ...s })
+
 export const NO_DETAILS: Record<string, RunDetail> = {}
 
 export const FIRST_VIEW: View = { runId: null, tab: 'summary', isPicking: false }

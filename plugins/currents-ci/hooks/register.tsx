@@ -5,6 +5,7 @@ import type { Tab, View } from '../types'
 import {
   ensureDetail,
   ensureLoop,
+  ensureLoopSoon,
   fixWithClaude,
   openSignIn,
   markPushed,
@@ -17,7 +18,7 @@ import {
 } from './controller'
 import { lastScan, noteTool } from './currents'
 import { duration, outcomeSummary, VERDICT, verdictOf } from './model'
-import { EMPTY, FIRST_VIEW, NO_DETAILS, PANE } from './state'
+import { EMPTY, FIRST_VIEW, NO_DETAILS, PANE, normalize } from './state'
 import { CLAUDE_DIRECTORY, drawBand, drawPane, type Actions } from './views'
 
 const snapshot = atom({ plugin: 'currents-ci', key: 'snapshot' } as const, EMPTY)
@@ -35,7 +36,7 @@ const PUSH = /\bgit\s+(?:-\S+\s+)*push\b|\bgh\s+pr\s+(?:create|ready)\b/
 
 async function openPane($: Engine) {
   const opened = await $.ui.open({ id: PANE, title: 'Currents', columns: 76, rows: 24 })
-  void quietly(ensureDetail($, shownRun(await read($, snapshot), await read($, view))))
+  void quietly(ensureDetail($, shownRun(normalize(await read($, snapshot)), await read($, view))))
   return opened
 }
 
@@ -51,12 +52,12 @@ async function selectRun($: Engine, runId: string | null) {
     runId,
     tab: current.tab === 'prs' ? 'summary' : current.tab,
   }))
-  await ensureDetail($, shownRun(await read($, snapshot), v))
+  await ensureDetail($, shownRun(normalize(await read($, snapshot)), v))
 }
 
 async function selectTab($: Engine, tab: Tab) {
   const v = await update($, view, (current): View => ({ ...current, tab }))
-  await ensureDetail($, shownRun(await read($, snapshot), v))
+  await ensureDetail($, shownRun(normalize(await read($, snapshot)), v))
 }
 
 /** One line for a command's reply. */
@@ -151,8 +152,8 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    ensureLoop($, settings)
-    const s = await read($, snapshot)
+    ensureLoopSoon($, settings)
+    const s = normalize(await read($, snapshot))
     const v = await read($, view)
     const all = await read($, details)
     const run = shownRun(s, v)
@@ -169,17 +170,19 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    ensureLoop($, settings)
+    ensureLoopSoon($, settings)
     if (e.props.hasSurvey || (await read($, bandHidden))) return next(e)
-    const tree = drawBand(
-      $.ui.resolve(e),
-      await read($, snapshot),
-      await $.clock.now(),
-      e.props.bodyColumns,
-      actionsFor($, settings),
-    )
+    const s = normalize(await read($, snapshot))
+    const now = await $.clock.now()
+    const { Box, Text } = $.ui.resolve(e)
+    let tree
+    try {
+      tree = drawBand($.ui.resolve(e), s, now, e.props.bodyColumns, actionsFor($, settings))
+    } catch (error) {
+      // A band that fails to draw says so rather than vanishing.
+      tree = <Text color="warning">{`Currents: the band could not draw (${error instanceof Error ? error.message : String(error)})`}</Text>
+    }
     if (tree === null) return next(e)
-    const { Box } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
         {tree}

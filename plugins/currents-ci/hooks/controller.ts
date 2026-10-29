@@ -25,7 +25,7 @@ import {
   verdictOf,
 } from './model'
 import { gitUserName, mostRecent, myOpenPrs, projectIdsInRepo, readRepo, type OpenPr } from './repo'
-import { EMPTY, FIRST_VIEW, NO_DETAILS, PANE } from './state'
+import { EMPTY, FIRST_VIEW, NO_DETAILS, PANE, normalize } from './state'
 
 const snapshot = atom({ plugin: 'currents-ci', key: 'snapshot' } as const, EMPTY)
 const details = atom({ plugin: 'currents-ci', key: 'details' } as const, NO_DETAILS)
@@ -78,16 +78,27 @@ let isLooping = false
 /**
  * Starts the refresh loop once per load of the module, from whichever hook runs
  * first: a plugin loaded by `/reload-plugins` mid-session sees no session.start.
- * Deferred to a timer, so a render hook can call it without writing state.
  */
 export function ensureLoop($: Engine, options: Options) {
   if (isLooping) return
   isLooping = true
-  $.clock.after(0, () => {
-    void refresh($, options)
-      .finally(() => schedule($, options).catch(() => undefined))
-      .catch(() => undefined)
-  })
+  void refresh($, options)
+    .finally(() => schedule($, options).catch(() => undefined))
+    .catch(() => undefined)
+}
+
+/**
+ * The same from a render hook, which must not write: it asks for a timer to
+ * start the loop. The engine may refuse a timer asked while drawing, so nothing
+ * counts as started until the loop runs, and the next hook tries again.
+ */
+export function ensureLoopSoon($: Engine, options: Options) {
+  if (isLooping) return
+  try {
+    $.clock.after(0, () => ensureLoop($, options))
+  } catch {
+    // left to the next hook
+  }
 }
 
 export function refresh($: Engine, options: Options): Promise<void> {
@@ -440,7 +451,7 @@ const keepNewest = (all: Record<string, RunDetail>, keep: string) => {
  * the terminal's /mcp dialog, or on another surface /mcp drafted in the box.
  */
 export async function openSignIn($: Engine, surface: RenderSurface) {
-  const s = await read($, snapshot)
+  const s = normalize(await read($, snapshot))
   const server =
     s.connection.state === 'missing' && s.connection.server !== null
       ? s.connection.server

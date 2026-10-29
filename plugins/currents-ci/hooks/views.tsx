@@ -130,7 +130,7 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
   const c = s.connection
   switch (c.state) {
     case 'checking':
-      return null
+      return row([brand, { text: ' · loading…', dim: true }], { labels: [], nodes: [] })
     case 'missing': {
       // The first part stays, cut short if it must; the hint goes first when there is no room.
       const text: Seg[] =

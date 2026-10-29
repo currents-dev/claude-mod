@@ -86,6 +86,7 @@ const world = (on: On, init: Partial<World> = {}): World => {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
   on('tool.describe', ($, e) => ({ description: e.description }))
+  on('prompt.submit', ($, e) => ({ text: e.text }))
   on('tool.list', () => ({
     value: [
       { name: 'Bash', description: 'Runs a command', mcp: false },
@@ -333,4 +334,12 @@ test("a repository whose project the sign-in can't see says so, and falls back t
   const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await pane.find({ type: 'Text', text: /records to AbC123, which your Currents sign-in can't see/ })).toBeDefined()
   expect(await pane.find({ key: 'project' })).toBeDefined()
+})
+
+test("a timer the band asked for that never fires doesn't hold the loop back: the next prompt starts it", async ($, on) => {
+  world(on)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await band.find({ type: 'Text', text: /loading/ })).toBeDefined()
+  await $.prompt.submit({ text: 'run the tests', wait: false, origin: { kind: 'composer' } })
+  expect(await band.find({ type: 'Text', text: /3 failed, 2 flaky/ })).toBeDefined()
 })
