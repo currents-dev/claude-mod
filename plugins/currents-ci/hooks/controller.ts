@@ -73,6 +73,23 @@ const activeRuns = (s: Snapshot) => [s.branchRuns[0], ...s.prs.map(pr => pr.late
   (run): run is Run => run !== undefined && isActive(run),
 )
 
+let isLooping = false
+
+/**
+ * Starts the refresh loop once per load of the module, from whichever hook runs
+ * first: a plugin loaded by `/reload-plugins` mid-session sees no session.start.
+ * Deferred to a timer, so a render hook can call it without writing state.
+ */
+export function ensureLoop($: Engine, options: Options) {
+  if (isLooping) return
+  isLooping = true
+  $.clock.after(0, () => {
+    void refresh($, options)
+      .finally(() => schedule($, options).catch(() => undefined))
+      .catch(() => undefined)
+  })
+}
+
 export function refresh($: Engine, options: Options): Promise<void> {
   inFlight ??= load($, options).finally(() => {
     inFlight = null
@@ -99,13 +116,15 @@ async function load($: Engine, options: Options) {
 
     const projects = await projectsOf($, connection.server, now)
     const choice = await resolveProject($, connection.server, repo, projects, author)
-    if (choice === null) {
+    if (choice.project === null) {
+      const { unseen } = choice
       await update($, snapshot, (s): Snapshot => ({
         ...s,
         connection,
         repo,
         projects,
         project: null,
+        unseen,
         projectSource: null,
         branchRuns: [],
         baseRun: null,
@@ -136,6 +155,7 @@ async function load($: Engine, options: Options) {
       repo,
       projects,
       project: choice.project,
+      unseen: [],
       projectSource: choice.source,
       branchRuns,
       scope: branch !== null ? 'branch' : 'mine',
@@ -220,10 +240,16 @@ async function projectsOf($: Engine, server: string, now: number) {
 
 const storeKey = (repo: Repo | null) => `project:${repo?.root ?? '-'}`
 
+type ProjectChoice =
+  | { project: Project; source: Snapshot['projectSource'] }
+  /** Nobody chose yet; `unseen`: projects the repository names that the sign-in cannot see. */
+  | { project: null; unseen: string[] }
+
 /**
  * The person's pick for this repository, else the project its Currents config
  * or CI names, else the only project they can see, else one whose runs name the
- * repository. Null when it takes a person to choose.
+ * repository. A repository that names projects the sign-in cannot see says so,
+ * rather than falling back to another organization's project.
  */
 async function resolveProject(
   $: Engine,
@@ -231,7 +257,7 @@ async function resolveProject(
   repo: Repo | null,
   projects: Project[],
   author: string | null,
-): Promise<{ project: Project; source: Snapshot['projectSource'] } | null> {
+): Promise<ProjectChoice> {
   const byId = new Map(projects.map(project => [project.projectId, project]))
   const key = storeKey(repo)
   const picked = (await $.store.get(key)) as Project | undefined
@@ -242,43 +268,47 @@ async function resolveProject(
   if (known !== undefined) return known
 
   let choice: { project: Project; source: Snapshot['projectSource'] } | null = null
-  if (projects.length === 1 && projects[0] !== undefined) {
-    choice = { project: projects[0], source: 'only' }
-  } else if (repo !== null) {
-    const counted = (await projectIdsInRepo($, repo.root)).filter(entry => byId.has(entry.projectId))
-    const top = counted[0]?.count ?? 0
+  const named = repo === null ? [] : await projectIdsInRepo($, repo.root)
+  const visible = named.filter(entry => byId.has(entry.projectId))
+  if (named.length > 0 && visible.length === 0) {
+    // The repository records to projects of an organization this sign-in is not in.
+    return { project: null, unseen: named.map(entry => entry.projectId) }
+  }
+  if (repo !== null && visible.length > 0) {
+    const top = visible[0]?.count ?? 0
     // The most-named project wins outright; a tie goes to the one with the newest run.
-    const named = counted
+    const tied = visible
       .filter(entry => entry.count === top)
       .map(entry => byId.get(entry.projectId))
       .filter((p): p is Project => p !== undefined)
-    if (named.length === 1 && named[0] !== undefined) {
-      choice = { project: named[0], source: 'repo' }
-    } else if (named.length > 1) {
+    if (tied.length === 1 && tied[0] !== undefined) {
+      choice = { project: tied[0], source: 'repo' }
+    } else if (tied.length > 1) {
       const latest = await Promise.all(
-        named.slice(0, 4).map(async project => ({
+        tied.slice(0, 4).map(async project => ({
           project,
-          run: await fetchLatestRun(
-            $,
-            server,
-            project.projectId,
-            repo.branch ? { branches: [repo.branch] } : {},
-          ).catch(() => null),
+          run: await fetchLatestRun($, server, project.projectId, repo.branch ? { branches: [repo.branch] } : {}).catch(
+            () => null,
+          ),
         })),
       )
-      const best = mostRecent(latest) ?? named[0]
+      const best = mostRecent(latest) ?? tied[0]
       if (best !== undefined) choice = { project: best, source: 'repo' }
-    } else if (repo.slug !== null && projects.length <= 8) {
-      const slug = repo.slug
-      const latest = await Promise.all(
-        projects.map(async project => ({
-          project,
-          run: await fetchLatestRun($, server, project.projectId, { search: slug }).catch(() => null),
-        })),
-      )
-      const best = mostRecent(latest)
-      if (best !== null) choice = { project: best, source: 'remote' }
     }
+  }
+  if (choice === null && projects.length === 1 && projects[0] !== undefined) {
+    choice = { project: projects[0], source: 'only' }
+  }
+  if (choice === null && repo !== null && repo.slug !== null && projects.length <= 8) {
+    const slug = repo.slug
+    const latest = await Promise.all(
+      projects.map(async project => ({
+        project,
+        run: await fetchLatestRun($, server, project.projectId, { search: slug }).catch(() => null),
+      })),
+    )
+    const best = mostRecent(latest)
+    if (best !== null) choice = { project: best, source: 'remote' }
   }
   if (choice === null && repo === null && author !== null && projects.length <= 8) {
     const latest = await Promise.all(
@@ -290,7 +320,8 @@ async function resolveProject(
     const best = mostRecent(latest)
     if (best !== null) choice = { project: best, source: 'mine' }
   }
-  if (choice !== null) resolved.set(key, choice)
+  if (choice === null) return { project: null, unseen: [] }
+  resolved.set(key, choice)
   return choice
 }
 
@@ -303,6 +334,7 @@ export async function pickProject($: Engine, options: Options, project: Project)
   await update($, snapshot, (x): Snapshot => ({
     ...x,
     project,
+    unseen: [],
     projectSource: 'picked',
     branchRuns: [],
     prs: [],
@@ -409,7 +441,14 @@ const keepNewest = (all: Record<string, RunDetail>, keep: string) => {
  */
 export async function openSignIn($: Engine, surface: RenderSurface) {
   const s = await read($, snapshot)
-  const server = s.connection.state === 'missing' && s.connection.server !== null ? s.connection.server : 'Currents'
+  const server =
+    s.connection.state === 'missing' && s.connection.server !== null
+      ? s.connection.server
+      : s.connection.state === 'connected'
+        ? s.connection.server.replace(/^plugin_([^_]+)_/, 'plugin:$1:')
+        : 'Currents'
+  // Signed in to the wrong organization: the same dialog re-authenticates.
+  const what = s.unseen.length > 0 ? `re-authenticate ${server} and pick the organization that owns ${s.unseen[0]}` : `sign in to ${server}`
   if (surface === 'terminal') {
     try {
       await $.command.run({ command: 'mcp' })
@@ -421,8 +460,8 @@ export async function openSignIn($: Engine, surface: RenderSurface) {
   const filled = await $.prompt.fill({ text: '/mcp' }).catch(() => ({ isFilled: false }))
   $.ui.toast(
     filled.isFilled
-      ? `Press Enter to open this session's MCP servers, then sign in to ${server}.`
-      : `Open Connectors in the session sidebar, or type /mcp, and sign in to ${server}.`,
+      ? `Press Enter to open this session's MCP servers, then ${what}.`
+      : `Open Connectors in the session sidebar, or type /mcp, and ${what}.`,
     { timeoutMs: 12_000 },
   )
 }

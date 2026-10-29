@@ -165,6 +165,30 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
 
   if (s.project === null) {
     if (s.updatedAt === null) return row([brand, { text: ' · loading…', dim: true }], { labels: [], nodes: [] })
+    if (s.unseen.length > 0) {
+      // Signed in to another organization than the one the repository records to.
+      return row(
+        [
+          brand,
+          { text: ` · your sign-in can't see ${s.unseen.slice(0, 2).join(', ')}`, color: 'warning' },
+          { text: ', which this repository records to · sign in again and pick its organization', dim: true, drop: 1 },
+        ],
+        {
+          labels: ['Sign in again', 'Choose'],
+          nodes: [
+            <Button key="sign-in" variant="primary" label="Sign in again" onPress={press => actions.signIn(press.surface)} />,
+            <Button
+              key="choose"
+              label="Choose"
+              onPress={() => {
+                actions.picking(true)
+                actions.open()
+              }}
+            />,
+          ],
+        },
+      )
+    }
     const ask = s.repo === null ? ' · Choose your Currents project' : ' · Choose the Currents project this repository records to'
     return row([brand, { text: ask, dim: true }], {
       labels: ['Choose'],
@@ -361,8 +385,21 @@ const drawPicker = (ui: Ui, s: Snapshot, actions: Actions): RenderElement => {
   }
   return (
     <Box flexDirection="column" rowGap={1}>
+      {s.unseen.length > 0 && (
+        <Box flexDirection="column">
+          <Text color="warning">
+            {`${where} records to ${s.unseen.join(', ')}, which your Currents sign-in can't see: it is for another organization.`}
+          </Text>
+          <Text dimColor>
+            Sign in again and pick the organization that owns it: in /mcp, choose the Currents server and re-authenticate.
+          </Text>
+          <Box marginTop={1}>
+            <Button key="sign-in-again" variant="primary" label="Sign in again" onPress={press => actions.signIn(press.surface)} />
+          </Box>
+        </Box>
+      )}
       <Text>
-        Which Currents project does <Text bold>{where}</Text> record its runs to?
+        {s.unseen.length > 0 ? 'Or pick one of the projects you can see:' : `Which Currents project does ${where} record its runs to?`}
       </Text>
       {'Select' in ui ? (
         <ui.Select

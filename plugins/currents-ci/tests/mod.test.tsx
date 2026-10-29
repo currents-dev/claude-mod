@@ -1,5 +1,5 @@
 import type { On } from 'claude-code'
-import { expect, mock, test, type Engine } from 'claude-code/testing'
+import { expect, mock, test, type Engine, type MockClock } from 'claude-code/testing'
 
 import {
   NOW,
@@ -51,6 +51,9 @@ type World = {
   servers: string[]
   runFilters: Record<string, unknown>[]
   filled: string[]
+  /** The projects the sign-in sees; the fixtures' two when absent. */
+  projects?: unknown
+  clock?: MockClock
 }
 
 const text = (body: unknown) => ({ value: { content: [{ type: 'text', text: JSON.stringify(body) }], isError: false } })
@@ -72,7 +75,7 @@ const world = (on: On, init: Partial<World> = {}): World => {
     filled: [],
     ...init,
   }
-  mock.clock(on, { now: NOW })
+  w.clock = mock.clock(on, { now: NOW })
   mock.store(on)
   on('session.cwd', () => ({ value: '/work/web' }))
   on('ui.panes', () => ({ value: [] }))
@@ -111,7 +114,7 @@ const world = (on: On, init: Partial<World> = {}): World => {
     w.servers.push(e.server)
     switch (e.tool) {
       case 'currents-get-projects':
-        return text(projects)
+        return text(w.projects ?? projects)
       case 'currents-get-runs': {
         w.runFilters.push(e.args)
         const branches = (e.args.branches as string[] | undefined) ?? []
@@ -309,4 +312,25 @@ test('a run in progress shows its progress, and a push is watched', async ($, on
   await $.tool.call({ tool: 'Bash', command: 'git push origin fix-login' })
   w.latest = failedRun
   expect((await band.find({ type: 'Text', text: /fix-login/ }))?.text).toContain('waiting for its run to start')
+})
+
+test('the band starts the refresh loop itself when no session.start came, as after /reload-plugins', async ($, on) => {
+  const w = world(on)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await w.clock?.advance(1)
+  await w.clock?.settle()
+  expect(await band.find({ type: 'Text', text: /3 failed, 2 flaky/ })).toBeDefined()
+})
+
+test("a repository whose project the sign-in can't see says so, and falls back to no other project", async ($, on) => {
+  const w = world(on, { projects: ok([{ projectId: 'Zzz999', name: 'Onboarding', createdAt: NOW, defaultBranchName: 'main' }]) })
+  await start($)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await band.find({ type: 'Text', text: /your sign-in can't see AbC123/ })).toBeDefined()
+  expect(w.runFilters).toHaveLength(0)
+  await band.press({ key: 'sign-in' })
+  expect(w.filled).toEqual(['/mcp'])
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await pane.find({ type: 'Text', text: /records to AbC123, which your Currents sign-in can't see/ })).toBeDefined()
+  expect(await pane.find({ key: 'project' })).toBeDefined()
 })

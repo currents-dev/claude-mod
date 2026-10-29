@@ -137,6 +137,8 @@ export type Snapshot = {
   connection: Connection
   repo: Repo | null
   project: Project | null
+  /** Projects the repository names that the sign-in cannot see: another organization's. */
+  unseen: string[]
   /** Every project the credential sees, for the picker. */
   projects: Project[]
   projectSource: 'picked' | 'repo' | 'remote' | 'only' | 'mine' | null

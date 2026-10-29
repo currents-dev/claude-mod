@@ -4,6 +4,7 @@ import type { Tab, View } from '../types'
 
 import {
   ensureDetail,
+  ensureLoop,
   fixWithClaude,
   openSignIn,
   markPushed,
@@ -101,11 +102,12 @@ export const register: Register = (on, options) => {
     })
     const hidden = await $.store.get('bandHidden')
     if (typeof hidden === 'boolean') await update($, bandHidden, () => hidden)
-    void quietly(refresh($, settings).finally(() => quietly(schedule($, settings))))
+    ensureLoop($, settings)
     return next(e)
   })
 
   on('command.run', { command: 'currents' }, async ($, e) => {
+    ensureLoop($, settings)
     const arg = e.args.trim().toLowerCase()
     if (arg === 'refresh') {
       await refresh($, settings)
@@ -149,6 +151,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    ensureLoop($, settings)
     const s = await read($, snapshot)
     const v = await read($, view)
     const all = await read($, details)
@@ -166,6 +169,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    ensureLoop($, settings)
     if (e.props.hasSurvey || (await read($, bandHidden))) return next(e)
     const tree = drawBand(
       $.ui.resolve(e),
@@ -186,7 +190,14 @@ export const register: Register = (on, options) => {
 
   // The engine describes each tool it lists, deferred MCP tools included: the
   // Currents connector shows up here the turn after it is turned on.
+  // Any prompt also starts the loop, should nothing have yet.
+  on('prompt.submit', async ($, e, next) => {
+    ensureLoop($, settings)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('tool.describe', async ($, e, next) => {
+    ensureLoop($, settings)
     if (noteTool(e.tool) && (await read($, snapshot)).connection.state !== 'connected') {
       void quietly(retry($, settings))
     }

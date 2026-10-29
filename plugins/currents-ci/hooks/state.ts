@@ -8,6 +8,7 @@ export const EMPTY: Snapshot = {
   connection: { state: 'checking' },
   repo: null,
   project: null,
+  unseen: [],
   projects: [],
   projectSource: null,
   branchRuns: [],
