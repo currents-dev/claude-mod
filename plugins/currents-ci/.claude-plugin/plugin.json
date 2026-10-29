@@ -1,0 +1,45 @@
+{
+  "name": "currents-ci",
+  "version": "1.0.0",
+  "description": "Currents test runs in Claude Code: a live status band for your branch and PRs, and a drawer with the run's results, errors and spec files.",
+  "author": {
+    "name": "Currents",
+    "url": "https://currents.dev"
+  },
+  "homepage": "https://docs.currents.dev/ai/connect",
+  "repository": "https://github.com/currents-dev/claude-mod",
+  "license": "Apache-2.0",
+  "privacyPolicyUrl": "https://currents.dev/privacy-policy",
+  "keywords": [
+    "currents",
+    "ci",
+    "playwright",
+    "tests",
+    "pull-requests"
+  ],
+  "types": "./types/index.d.ts",
+  "mcpServers": {
+    "currents": {
+      "type": "http",
+      "url": "https://mcp.currents.dev/mcp"
+    }
+  },
+  "userConfig": {
+    "notifications": {
+      "type": "boolean",
+      "title": "Notify when a run finishes",
+      "description": "Raise a notification when a run on your branch or one of your pull requests finishes.",
+      "default": true
+    },
+    "pullRequests": {
+      "type": "string",
+      "title": "Pull requests to show",
+      "description": "mine: your open pull requests (from the GitHub CLI, else your git author name). all: the project's latest pull requests.",
+      "options": [
+        "mine",
+        "all"
+      ],
+      "default": "mine"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "currents",
+  "owner": {
+    "name": "Currents",
+    "url": "https://currents.dev"
+  },
+  "metadata": {
+    "description": "Claude Code plugins from Currents, the test results dashboard for Playwright and Cypress."
+  },
+  "plugins": [
+    {
+      "name": "currents-ci",
+      "source": "./plugins/currents-ci",
+      "description": "Currents test runs in Claude Code: a live status band for your branch and pull requests, and a drawer with the run's results, errors and spec files.",
+      "version": "1.0.0",
+      "author": { "name": "Currents", "url": "https://currents.dev" },
+      "homepage": "https://github.com/currents-dev/claude-mod/tree/main/plugins/currents-ci",
+      "license": "Apache-2.0",
+      "keywords": ["currents", "ci", "playwright", "tests", "pull-requests"]
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+# Laid by Claude Code beside a mod it loads: its own API types, per version.
+.claude-plugin/types/
+
+node_modules/
+.DS_Store
