@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { classify } from '../hooks/currents'
+import { allowRules, classify } from '../hooks/currents'
 import {
   ago,
   duration,
@@ -135,5 +135,26 @@ describe('words and helpers', () => {
     expect(classify('Failed: HTTP 429 slow down').kind).toBe('rate')
     expect(classify('MCP server "plugin:currents-ci:currents" is not connected').kind).toBe('disconnected')
     expect(classify('fetch failed: ENOTFOUND api.currents.dev').kind).toBe('network')
+    expect(
+      classify("Claude requested permissions to use mcp__plugin_currents-ci_currents__currents-get-projects, but you haven't granted it yet.").kind,
+    ).toBe('permission')
+    expect(classify('Permission to use mcp__x__currents-get-runs has been denied.').kind).toBe('permission')
+  })
+})
+
+describe("the band's reads", () => {
+  test('names the rules for its five read-only tools, as tool names spell the server', async () => {
+    expect(allowRules('plugin:currents-ci:currents')).toEqual([
+      'mcp__plugin_currents-ci_currents__currents-get-projects',
+      'mcp__plugin_currents-ci_currents__currents-get-runs',
+      'mcp__plugin_currents-ci_currents__currents-list-pull-requests',
+      'mcp__plugin_currents-ci_currents__currents-get-run-details',
+      'mcp__plugin_currents-ci_currents__currents-get-context',
+    ])
+    expect(allowRules('plugin_currents-ci_currents')[0]).toBe('mcp__plugin_currents-ci_currents__currents-get-projects')
+    expect(allowRules('claude.ai Currents')[1]).toBe('mcp__claude_ai_Currents__currents-get-runs')
+    expect(allowRules('3fb6525c-f3dd-4d77-ba6b-ffa7031a8a00')[4]).toBe(
+      'mcp__3fb6525c-f3dd-4d77-ba6b-ffa7031a8a00__currents-get-context',
+    )
   })
 })

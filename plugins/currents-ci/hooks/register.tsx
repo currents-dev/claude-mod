@@ -1,11 +1,10 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 import type { Tab, View } from '../types'
 
 import {
   ensureDetail,
   ensureLoop,
-  ensureLoopSoon,
   fixWithClaude,
   openSignIn,
   markPushed,
@@ -62,10 +61,18 @@ async function selectTab($: Engine, tab: Tab) {
 
 /** One line for a command's reply. */
 async function statusLine($: Engine) {
-  const s = await read($, snapshot)
+  const s = normalize(await read($, snapshot))
   const run = s.branchRuns[0]
+  if (s.error !== null && s.updatedAt === null) {
+    const rules = s.allow.length > 0 ? ` Allow the band's reads under "permissions" → "allow": ${s.allow.join(', ')}` : ''
+    return `Currents: ${s.error}${rules}`
+  }
+  if (s.connection.state === 'checking') return 'Currents is still loading.'
   if (s.connection.state !== 'connected') {
     return `Currents is not connected. Add the Currents connector (${CLAUDE_DIRECTORY}) and turn it on for this session.`
+  }
+  if (s.project === null && s.unseen.length > 0) {
+    return `Your Currents sign-in can't see ${s.unseen.join(', ')}, which this repository records to: sign in again in /mcp and pick its organization, or choose a project with /currents project.`
   }
   if (s.project === null) return 'Choose the project with /currents project.'
   if (run === undefined) return `No Currents runs on ${s.repo?.branch ?? 'this branch'} in ${s.project.name} yet.`
@@ -85,7 +92,17 @@ function actionsFor($: Engine, settings: Options): Actions {
     tab: tab => void quietly(selectTab($, tab)),
     pick: project => void quietly(pickProject($, settings, project)),
     picking: isPicking => void quietly(update($, view, (v): View => ({ ...v, isPicking }))),
+    copy: (text, surface) => void quietly(copyRules($, text, surface)),
   }
+}
+
+async function copyRules($: Engine, text: string, surface: RenderSurface) {
+  const copied = await $.ui.copy({ text, surface })
+  $.ui.toast(
+    copied.isCopied
+      ? 'Copied the rules: paste them under "permissions" → "allow" in ~/.claude/settings.json.'
+      : 'Could not copy: the rules are in the Currents drawer.',
+  )
 }
 
 export const register: Register = (on, options) => {
@@ -152,7 +169,6 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    ensureLoopSoon($, settings)
     const s = normalize(await read($, snapshot))
     const v = await read($, view)
     const all = await read($, details)
@@ -169,8 +185,9 @@ export const register: Register = (on, options) => {
     })
   })
 
+  // A drawing only reads. The loop starts from session.start, which a reload
+  // runs again, or from the next prompt or command.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    ensureLoopSoon($, settings)
     if (e.props.hasSurvey || (await read($, bandHidden))) return next(e)
     const s = normalize(await read($, snapshot))
     const now = await $.clock.now()

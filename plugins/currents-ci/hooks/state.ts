@@ -20,6 +20,7 @@ export const EMPTY: Snapshot = {
   updatedAt: null,
   isLoading: false,
   error: null,
+  allow: [],
 }
 
 /** A snapshot an earlier version saved lacks the fields added since: fill them in. */

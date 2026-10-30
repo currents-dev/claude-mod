@@ -29,7 +29,10 @@ and the VS Code extension. It needs Claude Code 2.1.287 or later (the Desktop
 app's 2.1.286 or later).
 
 Then connect Currents: press **Sign in** on the band, or connect
-[Currents in the Claude directory](https://claude.ai/directory/currents). The
+[Currents in the Claude directory](https://claude.ai/directory/currents). And
+allow the five read-only Currents tools the band calls in the background, or
+Claude Code holds every read for an approval nobody sees: the band's
+**Allow…** shows the rules. The
 [plugin's README](plugins/currents-ci/README.md) has the details.
 
 ## Develop

@@ -13,7 +13,27 @@ type Engine = EngineInterface
 /** A tool every Currents MCP server has with `results:read`, which identifies one. */
 const SIGNATURE = '__currents-get-runs'
 
-export type FailureKind = 'auth' | 'scope' | 'rate' | 'network' | 'disconnected' | 'api'
+export type FailureKind = 'auth' | 'scope' | 'rate' | 'network' | 'disconnected' | 'permission' | 'api'
+
+/** Every tool the mod calls: reads only. */
+export const READS = [
+  'currents-get-projects',
+  'currents-get-runs',
+  'currents-list-pull-requests',
+  'currents-get-run-details',
+  'currents-get-context',
+] as const
+
+/** A server's name as tool names spell it: `plugin:currents-ci:currents` → `plugin_currents-ci_currents`. */
+export const toolSpelling = (server: string) => server.replace(/[^A-Za-z0-9_-]/g, '_')
+
+/**
+ * The permission rules that let the band read through `server`. The engine puts
+ * a plugin's `$.mcp.call` to the session's permission check like the model's
+ * calls, and a plugin cannot answer for its own: until the person allows these,
+ * every read is refused, or held for an approval nobody is shown.
+ */
+export const allowRules = (server: string) => READS.map(tool => `mcp__${toolSpelling(server)}__${tool}`)
 
 export class CurrentsError extends Error {
   kind: FailureKind
@@ -43,6 +63,10 @@ export const classify = (text: string): CurrentsError => {
     return new CurrentsError('Your Currents role or sign-in does not allow reading these results.', 'scope', code)
   }
   if (code === 429) return new CurrentsError('Currents is rate limiting requests; slowing down.', 'rate', code)
+  // The engine's own refusal of the call, before it reached Currents.
+  if (/requested permissions? to use|haven't granted|permission to use .+ (?:has been |was )?denied|permission denied/i.test(text)) {
+    return new CurrentsError("This session's permissions stopped the band reading Currents.", 'permission', code)
+  }
   if (/not connected|disconnected|no (mcp )?server|unknown server|closed/i.test(text)) {
     return new CurrentsError('The Currents MCP server disconnected.', 'disconnected', code)
   }

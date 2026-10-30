@@ -71,6 +71,36 @@ The band and the drawer fill in within 20 seconds of a connection appearing.
 Each of these also gives Claude the Currents tools that **Fix with Claude**
 relies on.
 
+### Allow the band's reads
+
+Claude Code checks the plugin's tool calls as it checks the model's, and asks
+before a Currents tool runs unless that tool is allowed. A plugin cannot answer
+for its own calls, and the band polls in the background where nobody sees the
+question. So allow the five read-only tools it calls, for the server it reads
+through, under `permissions.allow` in `~/.claude/settings.json`. For the
+plugin's own server:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_currents-ci_currents__currents-get-projects",
+      "mcp__plugin_currents-ci_currents__currents-get-runs",
+      "mcp__plugin_currents-ci_currents__currents-list-pull-requests",
+      "mcp__plugin_currents-ci_currents__currents-get-run-details",
+      "mcp__plugin_currents-ci_currents__currents-get-context"
+    ]
+  }
+}
+```
+
+Until they are allowed, the band says the session's permissions stopped it,
+and **Allow…** opens the drawer with the rules for the server in use (the
+connector's id stands in for `plugin_currents-ci_currents` there) and a button
+that copies them. Claude Code picks up the change without a restart: press
+**Check again**. The rules also let Claude call these five tools without
+asking; none of them changes anything in Currents.
+
 ## Which project
 
 1. The one you picked for this repository (`/currents project`).

@@ -158,6 +158,11 @@ export type Snapshot = {
   updatedAt: number | null
   isLoading: boolean
   error: string | null
+  /**
+   * The permission rules the band's reads wait on: set when the session refused
+   * a read, or a refresh hung as on an approval nobody is shown; else empty.
+   */
+  allow: string[]
 }
 
 export type Tab = 'summary' | 'errors' | 'specs' | 'prs'

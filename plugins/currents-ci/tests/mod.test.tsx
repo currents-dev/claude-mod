@@ -53,6 +53,11 @@ type World = {
   filled: string[]
   /** The projects the sign-in sees; the fixtures' two when absent. */
   projects?: unknown
+  /** The session's permission check refuses every Currents call. */
+  denied?: boolean
+  /** Currents calls hang, as one held for an approval nobody is shown, until released. */
+  stalls?: boolean
+  held: (() => void)[]
   clock?: MockClock
 }
 
@@ -73,6 +78,7 @@ const world = (on: On, init: Partial<World> = {}): World => {
     servers: [],
     runFilters: [],
     filled: [],
+    held: [],
     ...init,
   }
   w.clock = mock.clock(on, { now: NOW })
@@ -110,9 +116,14 @@ const world = (on: On, init: Partial<World> = {}): World => {
   )
   // The engine's own band beneath the mods: empty.
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => $.ui.resolve(e).Box({}))
-  on('mcp.call', ($, e) => {
+  on('mcp.call', async ($, e) => {
     w.calls.push(e.tool)
     w.servers.push(e.server)
+    if (w.denied) {
+      const refusal = `Claude requested permissions to use mcp__${e.server}__${e.tool}, but you haven't granted it yet.`
+      return { value: { content: [{ type: 'text', text: refusal }], isError: true } }
+    }
+    if (w.stalls) await new Promise<void>(resolve => w.held.push(resolve))
     switch (e.tool) {
       case 'currents-get-projects':
         return text(w.projects ?? projects)
@@ -315,11 +326,15 @@ test('a run in progress shows its progress, and a push is watched', async ($, on
   expect((await band.find({ type: 'Text', text: /fix-login/ }))?.text).toContain('waiting for its run to start')
 })
 
-test('the band starts the refresh loop itself when no session.start came, as after /reload-plugins', async ($, on) => {
+test('drawing the band only reads: it shows loading and asks for nothing until session.start', async ($, on) => {
   const w = world(on)
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  await w.clock?.advance(1)
+  await w.clock?.advance(5_000)
   await w.clock?.settle()
+  expect(await band.find({ type: 'Text', text: /loading/ })).toBeDefined()
+  expect(w.calls).toEqual([])
+  // A reload runs session.start again, which starts the loop.
+  await $.session.start({ cwd: '/work/web', surface: 'desktop', isInteractive: true })
   expect(await band.find({ type: 'Text', text: /3 failed, 2 flaky/ })).toBeDefined()
 })
 
@@ -336,10 +351,57 @@ test("a repository whose project the sign-in can't see says so, and falls back t
   expect(await pane.find({ key: 'project' })).toBeDefined()
 })
 
-test("a timer the band asked for that never fires doesn't hold the loop back: the next prompt starts it", async ($, on) => {
+test('with no session.start, the next prompt starts the loop', async ($, on) => {
   world(on)
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await band.find({ type: 'Text', text: /loading/ })).toBeDefined()
   await $.prompt.submit({ text: 'run the tests', wait: false, origin: { kind: 'composer' } })
   expect(await band.find({ type: 'Text', text: /3 failed, 2 flaky/ })).toBeDefined()
+})
+
+test("reads the session's permissions refuse say so and name the rules to allow, rather than loading", async ($, on) => {
+  const w = world(on, { denied: true })
+  const copied: string[] = []
+  on('ui.copy', ($, e) => {
+    copied.push(e.text)
+    return { value: { isCopied: true } }
+  })
+  await start($)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const band = await $.ui.mount({ ...BAND, surface })
+    expect(await band.find({ type: 'Text', text: /permissions stopped the band reading Currents/ })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: /loading/ })).toBeUndefined()
+    expect(await band.find({ key: 'allow' })).toBeDefined()
+    expect(await band.find({ key: 'retry' })).toBeDefined()
+    await band.unmount()
+  }
+
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'allow' })
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const rules = (await pane.find({ type: 'Code' }))?.props.source
+  expect(rules).toContain(`"mcp__${CONNECTOR}__currents-get-runs"`)
+  expect(rules).toContain(`"mcp__${CONNECTOR}__currents-get-context"`)
+  await pane.press({ key: 'copy-rules' })
+  expect(copied[0]?.split('\n')).toHaveLength(5)
+  expect(copied[0]).toContain(`"mcp__${CONNECTOR}__currents-get-projects",`)
+
+  // Allowed, Check again shows the runs.
+  w.denied = false
+  await pane.press({ key: 'retry' })
+  expect(await band.find({ type: 'Text', text: /3 failed, 2 flaky/ })).toBeDefined()
+})
+
+test('a refresh that never hears back says so after a minute, and offers the rules', async ($, on) => {
+  const w = world(on, { stalls: true })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const submitted = $.prompt.submit({ text: 'run the tests', wait: false, origin: { kind: 'composer' } })
+  await w.clock?.advance(60_000)
+  await w.clock?.settle()
+  expect(await band.find({ type: 'Text', text: /did not answer within a minute/ })).toBeDefined()
+  expect(await band.find({ key: 'allow' })).toBeDefined()
+  expect(await band.find({ key: 'retry' })).toBeDefined()
+  w.stalls = false
+  for (const release of w.held) release()
+  await submitted
 })

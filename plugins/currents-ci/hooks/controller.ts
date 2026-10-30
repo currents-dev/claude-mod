@@ -3,9 +3,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderSurface, Timer } from 'claude-code'
 
-import type { Project, PullRequest, Repo, Run, RunDetail, Snapshot, Verdict, View } from '../types'
+import type { Connection, Project, PullRequest, Repo, Run, RunDetail, Snapshot, Verdict, View } from '../types'
 import {
   CurrentsError,
+  allowRules,
   discover,
   fetchDetail,
   fetchLatestRun,
@@ -76,8 +77,9 @@ const activeRuns = (s: Snapshot) => [s.branchRuns[0], ...s.prs.map(pr => pr.late
 let isLooping = false
 
 /**
- * Starts the refresh loop once per load of the module, from whichever hook runs
- * first: a plugin loaded by `/reload-plugins` mid-session sees no session.start.
+ * Starts the refresh loop once per load of the module, from session.start (a
+ * reload runs it again) or, should another hook come first, from that one.
+ * Never from a render hook: a drawing reads, and asks for nothing.
  */
 export function ensureLoop($: Engine, options: Options) {
   if (isLooping) return
@@ -87,41 +89,56 @@ export function ensureLoop($: Engine, options: Options) {
     .catch(() => undefined)
 }
 
-/**
- * The same from a render hook, which must not write: it asks for a timer to
- * start the loop. The engine may refuse a timer asked while drawing, so nothing
- * counts as started until the loop runs, and the next hook tries again.
- */
-export function ensureLoopSoon($: Engine, options: Options) {
-  if (isLooping) return
-  try {
-    $.clock.after(0, () => ensureLoop($, options))
-  } catch {
-    // left to the next hook
-  }
-}
+/** How long a refresh may take before the band stops saying "loading…" and says why. */
+const REFRESH_LIMIT = 60 * SECOND
+const STALLED = 'Currents did not answer within a minute.'
+
+/** The server the refresh under way reads through, once found. */
+let reading: string | null = null
 
 export function refresh($: Engine, options: Options): Promise<void> {
-  inFlight ??= load($, options).finally(() => {
-    inFlight = null
-  })
+  if (inFlight === null) {
+    // A call that never settles (held for an approval nobody is shown) ends the wait, not the band.
+    let guard: Timer | null = null
+    const limit = new Promise<void>(resolve => {
+      guard = $.clock.after(REFRESH_LIMIT, () => {
+        failures += 1
+        const server = reading
+        void update($, snapshot, (s): Snapshot => ({
+          ...s,
+          isLoading: false,
+          error: STALLED,
+          allow: server !== null ? allowRules(server) : [],
+        }))
+          .catch(() => undefined)
+          .finally(resolve)
+      })
+    })
+    inFlight = Promise.race([load($, options), limit]).finally(() => {
+      guard?.cancel()
+      inFlight = null
+    })
+  }
   return inFlight
 }
 
 async function load($: Engine, options: Options) {
   await update($, snapshot, (s): Snapshot => ({ ...s, isLoading: true }))
+  // The server found, so a failure past it is told as one rather than as "loading…".
+  let found: Connection | null = null
   try {
     const now = await $.clock.now()
     const repo = await readRepo($, await $.session.cwd())
     const before = await read($, snapshot)
-    const found = before.connection.state === 'connected' ? before.connection : await discover($)
+    found = before.connection.state === 'connected' ? before.connection : await discover($)
     if (found.state !== 'connected') {
       const message = before.connection.state === 'missing' ? before.connection.message : null
       const connection = found.state === 'missing' ? { ...found, message } : found
-      await update($, snapshot, (s): Snapshot => ({ ...s, connection, repo, isLoading: false, error: null }))
+      await update($, snapshot, (s): Snapshot => ({ ...s, connection, repo, isLoading: false, error: null, allow: [] }))
       return
     }
     const connection = found
+    reading = connection.server
     // Outside a repository the person's own runs stand in for a branch's.
     const author = repo === null || repo.branch === null ? await gitUserName($, repo?.root ?? (await $.session.cwd())) : null
 
@@ -143,6 +160,7 @@ async function load($: Engine, options: Options) {
         quietPrs: [],
         isLoading: false,
         error: null,
+        allow: [],
         updatedAt: now,
       }))
       return
@@ -177,6 +195,7 @@ async function load($: Engine, options: Options) {
       updatedAt: now,
       isLoading: false,
       error: null,
+      allow: [],
     }))
     failures = 0
     announce($, next, options)
@@ -188,15 +207,16 @@ async function load($: Engine, options: Options) {
     failures += 1
     const failure = error instanceof CurrentsError ? error : new CurrentsError(messageOf(error), 'api')
     const isLost = failure.kind === 'auth' || failure.kind === 'disconnected'
+    const reached = found
     if (isLost) {
       projectsCache = null
-      const { connection } = await read($, snapshot)
-      if (connection.state === 'connected') forget(connection.server)
+      if (reached?.state === 'connected') forget(reached.server)
     }
     await update($, snapshot, (s): Snapshot => ({
       ...s,
       isLoading: false,
       error: failure.message,
+      allow: failure.kind === 'permission' && reached?.state === 'connected' ? allowRules(reached.server) : [],
       connection: isLost
         ? {
             state: 'missing',
@@ -206,7 +226,9 @@ async function load($: Engine, options: Options) {
                 ? 'The Currents connection needs signing in again: reconnect Currents in Connectors (or /mcp).'
                 : 'The Currents connection dropped: reconnect Currents in Connectors (or /mcp).',
           }
-        : s.connection,
+        : reached?.state === 'connected'
+          ? reached
+          : s.connection,
     }))
   }
 }

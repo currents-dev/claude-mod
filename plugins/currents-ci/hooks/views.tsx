@@ -39,7 +39,11 @@ export type Actions = {
   tab: (tab: Tab) => void
   pick: (project: Project) => void
   picking: (isPicking: boolean) => void
+  copy: (text: string, surface: RenderSurface) => void
 }
+
+/** The band's reads wait on permission rules, and nothing has loaded yet. */
+const isBlocked = (s: Snapshot) => s.allow.length > 0 && s.error !== null && s.updatedAt === null
 
 export const CLAUDE_DIRECTORY = 'https://claude.ai/directory/currents'
 
@@ -127,9 +131,34 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
     )
   }
 
+  // A refresh that failed before anything loaded says why, never "loading…" for good.
+  const failed = (error: string) =>
+    row([brand, { text: ` · ${error}`, color: 'warning' }], {
+      labels: ['Retry'],
+      nodes: [<Button key="retry" label="Retry" onPress={actions.retry} />],
+    })
+  // Reads the session's permissions refuse, or hold: the drawer says which rules to add.
+  const blocked = (error: string) =>
+    row(
+      [
+        brand,
+        { text: ` · ${error}`, color: 'warning' },
+        { text: ' · allow its five read-only tools', dim: true, drop: 1 },
+      ],
+      {
+        labels: ['Allow…', 'Retry'],
+        nodes: [
+          <Button key="allow" variant="primary" label="Allow…" onPress={actions.open} />,
+          <Button key="retry" label="Retry" onPress={actions.retry} />,
+        ],
+      },
+    )
+  if (isBlocked(s) && s.error !== null) return blocked(s.error)
+
   const c = s.connection
   switch (c.state) {
     case 'checking':
+      if (s.error !== null) return failed(s.error)
       return row([brand, { text: ' · loading…', dim: true }], { labels: [], nodes: [] })
     case 'missing': {
       // The first part stays, cut short if it must; the hint goes first when there is no room.
@@ -162,6 +191,8 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
     case 'connected':
       break
   }
+
+  if (s.error !== null && s.updatedAt === null) return failed(s.error)
 
   if (s.project === null) {
     if (s.updatedAt === null) return row([brand, { text: ' · loading…', dim: true }], { labels: [], nodes: [] })
@@ -202,13 +233,6 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
           }}
         />,
       ],
-    })
-  }
-
-  if (s.error !== null && s.updatedAt === null) {
-    return row([brand, { text: ` · ${s.error}`, color: 'warning' }], {
-      labels: ['Retry'],
-      nodes: [<Button key="retry" label="Retry" onPress={actions.retry} />],
     })
   }
 
@@ -316,7 +340,8 @@ export const drawPane = (ui: Ui, input: PaneInput): RenderElement => {
   )
 
   let body: RenderElement
-  if (c.state !== 'connected') body = drawConnect(ui, s, input.surface, actions)
+  if (isBlocked(s)) body = drawAllow(ui, s, actions)
+  else if (c.state !== 'connected') body = drawConnect(ui, s, input.surface, actions)
   else if (v.isPicking || s.project === null) body = drawPicker(ui, s, actions)
   else body = drawRunView(ui, input)
 
@@ -331,10 +356,44 @@ export const drawPane = (ui: Ui, input: PaneInput): RenderElement => {
 
 const ADD_SERVER = 'claude mcp add --transport http --scope user currents https://mcp.currents.dev/mcp'
 
+/** The rules the band's reads wait on, and where they go. */
+const drawAllow = (ui: Ui, s: Snapshot, actions: Actions): RenderElement => {
+  const { Box, Text, Button, Code } = ui
+  return (
+    <Box flexDirection="column" rowGap={1}>
+      <Text color="warning">{s.error}</Text>
+      <Text>
+        <Text bold>Let the band read Currents. </Text>
+        {"Claude Code checks the band's calls as it checks the model's, and asks before a Currents tool runs unless that tool is allowed. The band calls five read-only tools: add them to \"permissions\" → \"allow\" in ~/.claude/settings.json, then press Check again."}
+      </Text>
+      <Code source={JSON.stringify({ permissions: { allow: s.allow } }, null, 2)} language="json" />
+      <Box columnGap={2}>
+        <Button
+          key="copy-rules"
+          variant="primary"
+          label="Copy the rules"
+          onPress={press => actions.copy(s.allow.map(rule => `"${rule}"`).join(',\n'), press.surface)}
+        />
+        <Button key="retry" label="Check again" onPress={actions.retry} />
+      </Box>
+    </Box>
+  )
+}
+
 const drawConnect = (ui: Ui, s: Snapshot, surface: RenderSurface, actions: Actions): RenderElement => {
   const { Box, Text, Button, Link, Code } = ui
   const c = s.connection
-  if (c.state === 'checking') return <Text dimColor>Looking for a Currents connection…</Text>
+  if (c.state === 'checking') {
+    if (s.error === null) return <Text dimColor>Looking for a Currents connection…</Text>
+    return (
+      <Box flexDirection="column" rowGap={1}>
+        <Text color="warning">{s.error}</Text>
+        <Box>
+          <Button key="retry" label="Check again" onPress={actions.retry} />
+        </Box>
+      </Box>
+    )
+  }
   const server = c.state === 'missing' ? c.server : null
   const how =
     surface === 'terminal'
@@ -376,6 +435,16 @@ const drawPicker = (ui: Ui, s: Snapshot, actions: Actions): RenderElement => {
   const { Box, Text, Button } = ui
   const where = s.repo?.slug ?? s.repo?.root ?? 'this folder'
   if (s.projects.length === 0) {
+    if (s.error !== null && s.updatedAt === null) {
+      return (
+        <Box flexDirection="column" rowGap={1}>
+          <Text color="warning">{s.error}</Text>
+          <Box>
+            <Button key="retry" label="Check again" onPress={actions.retry} />
+          </Box>
+        </Box>
+      )
+    }
     return <Text dimColor>{s.updatedAt === null ? 'Loading your projects…' : 'Your Currents sign-in sees no projects.'}</Text>
   }
   const options = s.projects.map(project => ({ value: project.projectId, label: `${project.name} (${project.projectId})` }))
