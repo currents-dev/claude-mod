@@ -76,7 +76,9 @@ relies on.
 Claude Code checks the plugin's tool calls as it checks the model's, and asks
 before a Currents tool runs unless that tool is allowed. A plugin cannot answer
 for its own calls, and the band polls in the background where nobody sees the
-question. So allow the five read-only tools it calls, for the server it reads
+question. Auto mode lets a plugin's calls through in the terminal, but in the
+Desktop app its classifier judges only Claude's own calls and refuses the
+band's. So allow the five read-only tools it calls, for the server it reads
 through, under `permissions.allow` in `~/.claude/settings.json`. For the
 plugin's own server:
 

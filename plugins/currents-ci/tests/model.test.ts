@@ -139,6 +139,15 @@ describe('words and helpers', () => {
       classify("Claude requested permissions to use mcp__plugin_currents-ci_currents__currents-get-projects, but you haven't granted it yet.").kind,
     ).toBe('permission')
     expect(classify('Permission to use mcp__x__currents-get-runs has been denied.').kind).toBe('permission')
+    // What the engine throws when the permission check denies the call, here auto mode.
+    const refused = classify(
+      'currents-ci: $.mcp.call(3fb6525c-f3dd-4d77-ba6b-ffa7031a8a00, currents-get-projects) refused: The server-side auto mode classifier gave no verdict for mcp__3fb6525c-f3dd-4d77-ba6b-ffa7031a8a00__currents-get-projects',
+    )
+    expect(refused.kind).toBe('permission')
+    expect(refused.message).toBe("This session's permissions stopped the band reading Currents.")
+    expect(
+      classify('currents-ci: $.mcp.call: no connected MCP tool "currents-get-runs" on a server named "claude_ai_Currents"').kind,
+    ).toBe('disconnected')
   })
 })
 

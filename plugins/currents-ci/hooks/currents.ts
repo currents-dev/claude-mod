@@ -52,8 +52,14 @@ const tidy = (text: string) => {
   return line.length > 160 ? `${line.slice(0, 159)}…` : line
 }
 
+const REFUSED = "This session's permissions stopped the band reading Currents."
+
 /** Reads what went wrong out of an MCP error result or a rejected call. */
 export const classify = (text: string): CurrentsError => {
+  // The session's permission check denied the call before it reached Currents:
+  // a rule, a hook, or auto mode, whose classifier judges the model's calls and
+  // gives no verdict on a plugin's.
+  if (/\$\.mcp\.call\([^)]*\) refused:/.test(text)) return new CurrentsError(REFUSED, 'permission')
   const status = Number(/\bHTTP (\d{3})\b/.exec(text)?.[1] ?? Number.NaN)
   const code = Number.isFinite(status) ? status : null
   if (code === 401 || /needs you to sign in|needs auth|unauthori[sz]ed|re-?authenticate/i.test(text)) {
@@ -63,11 +69,11 @@ export const classify = (text: string): CurrentsError => {
     return new CurrentsError('Your Currents role or sign-in does not allow reading these results.', 'scope', code)
   }
   if (code === 429) return new CurrentsError('Currents is rate limiting requests; slowing down.', 'rate', code)
-  // The engine's own refusal of the call, before it reached Currents.
+  // The same refusal, written as the tool's result.
   if (/requested permissions? to use|haven't granted|permission to use .+ (?:has been |was )?denied|permission denied/i.test(text)) {
-    return new CurrentsError("This session's permissions stopped the band reading Currents.", 'permission', code)
+    return new CurrentsError(REFUSED, 'permission', code)
   }
-  if (/not connected|disconnected|no (mcp )?server|unknown server|closed/i.test(text)) {
+  if (/not connected|disconnected|no connected mcp tool|no (mcp )?server|unknown server|closed/i.test(text)) {
     return new CurrentsError('The Currents MCP server disconnected.', 'disconnected', code)
   }
   if (/fetch failed|ENOTFOUND|ECONNRE|ETIMEDOUT|timed? ?out|network/i.test(text)) {

@@ -55,6 +55,8 @@ type World = {
   projects?: unknown
   /** The session's permission check refuses every Currents call. */
   denied?: boolean
+  /** The engine throws the permission check's refusal instead, as under auto mode: its reason. */
+  refuses?: string
   /** Currents calls hang, as one held for an approval nobody is shown, until released. */
   stalls?: boolean
   held: (() => void)[]
@@ -123,6 +125,7 @@ const world = (on: On, init: Partial<World> = {}): World => {
       const refusal = `Claude requested permissions to use mcp__${e.server}__${e.tool}, but you haven't granted it yet.`
       return { value: { content: [{ type: 'text', text: refusal }], isError: true } }
     }
+    if (w.refuses !== undefined) return { deny: `currents-ci: $.mcp.call(${e.server}, ${e.tool}) refused: ${w.refuses}` }
     if (w.stalls) await new Promise<void>(resolve => w.held.push(resolve))
     switch (e.tool) {
       case 'currents-get-projects':
@@ -389,6 +392,19 @@ test("reads the session's permissions refuse say so and name the rules to allow,
   // Allowed, Check again shows the runs.
   w.denied = false
   await pane.press({ key: 'retry' })
+  expect(await band.find({ type: 'Text', text: /3 failed, 2 flaky/ })).toBeDefined()
+})
+
+test("auto mode's refusal, which the engine throws, offers the rules too", async ($, on) => {
+  const w = world(on, { refuses: 'The server-side auto mode classifier gave no verdict for this call' })
+  await start($)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await band.find({ type: 'Text', text: /permissions stopped the band reading Currents/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /\$\.mcp\.call/ })).toBeUndefined()
+  expect(await band.find({ key: 'allow' })).toBeDefined()
+
+  w.refuses = undefined
+  await band.press({ key: 'retry' })
   expect(await band.find({ type: 'Text', text: /3 failed, 2 flaky/ })).toBeDefined()
 })
 
