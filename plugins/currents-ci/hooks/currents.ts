@@ -15,7 +15,10 @@ const SIGNATURE = '__currents-get-runs'
 
 export type FailureKind = 'auth' | 'scope' | 'rate' | 'network' | 'disconnected' | 'permission' | 'api'
 
-/** Every tool the mod calls: reads only. */
+/**
+ * Every tool the mod calls: reads only. The PreToolUse hook in hooks.json allows
+ * these five, on any server; keep its matcher in step.
+ */
 export const READS = [
   'currents-get-projects',
   'currents-get-runs',
@@ -30,8 +33,9 @@ export const toolSpelling = (server: string) => server.replace(/[^A-Za-z0-9_-]/g
 /**
  * The permission rules that let the band read through `server`. The engine puts
  * a plugin's `$.mcp.call` to the session's permission check like the model's
- * calls, and a plugin cannot answer for its own: until the person allows these,
- * every read is refused, or held for an approval nobody is shown.
+ * calls, and skips the plugin's own hooks module for them. The PreToolUse hook
+ * in hooks.json allows the reads; where it does not decide (plugin hooks turned
+ * off, auto mode's classifier asked anyway), these rules do.
  */
 export const allowRules = (server: string) => READS.map(tool => `mcp__${toolSpelling(server)}__${tool}`)
 

@@ -1,1 +1,16 @@
-{ "modules": ["./register.tsx"] }
+{
+  "modules": ["./register.tsx"],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__.+__currents-(get-projects|get-runs|list-pull-requests|get-run-details|get-context)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"currents-ci allows its five read-only Currents tools\"}}'"
+          }
+        ]
+      }
+    ]
+  }
+}

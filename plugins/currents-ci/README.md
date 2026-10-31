@@ -71,16 +71,26 @@ The band and the drawer fill in within 20 seconds of a connection appearing.
 Each of these also gives Claude the Currents tools that **Fix with Claude**
 relies on.
 
-### Allow the band's reads
+### The band's reads
 
-Claude Code checks the plugin's tool calls as it checks the model's, and asks
-before a Currents tool runs unless that tool is allowed. A plugin cannot answer
-for its own calls, and the band polls in the background where nobody sees the
-question. Auto mode lets a plugin's calls through in the terminal, but in the
-Desktop app its classifier judges only Claude's own calls and refuses the
-band's. So allow the five read-only tools it calls, for the server it reads
-through, under `permissions.allow` in `~/.claude/settings.json`. For the
-plugin's own server:
+Claude Code checks a plugin's tool calls as it checks Claude's, and the band
+polls in the background, where nobody would see the question. So the plugin
+allows the five read-only Currents tools it calls: a `PreToolUse` hook in
+`hooks/hooks.json` approves `currents-get-projects`, `currents-get-runs`,
+`currents-list-pull-requests`, `currents-get-run-details` and
+`currents-get-context`, on whichever Currents server the session has. Claude
+can call these five without asking too. None of them changes anything in
+Currents, every other Currents tool asks as before, and a `deny` rule for one
+of the five still wins.
+
+Where the hook does not decide, the band says the session's permissions
+stopped it, and **Allow…** opens the drawer with the five as rules for
+`permissions.allow` in `~/.claude/settings.json`, and a button that copies
+them. That happens when an organization turns plugin hooks off
+(`disableAllHooks`, or `allowManagedHooksOnly` for a plugin it does not
+manage), and can happen in auto mode in the Desktop app, whose classifier
+judges only Claude's own calls and is asked even about an approved one. For
+the plugin's own server:
 
 ```json
 {
@@ -96,12 +106,9 @@ plugin's own server:
 }
 ```
 
-Until they are allowed, the band says the session's permissions stopped it,
-and **Allow…** opens the drawer with the rules for the server in use (the
-connector's id stands in for `plugin_currents-ci_currents` there) and a button
-that copies them. Claude Code picks up the change without a restart: press
-**Check again**. The rules also let Claude call these five tools without
-asking; none of them changes anything in Currents.
+The connector's id stands in for `plugin_currents-ci_currents` when the band
+reads through the Currents connector. Claude Code picks up the rules without a
+restart: press **Check again**.
 
 ## Which project
 
@@ -149,6 +156,8 @@ latest pull requests.
 - `gh pr list` for your open pull requests, every two minutes at most.
 - Currents, only through the Currents connector (or your Currents MCP server).
   It reads results and projects and changes nothing.
+- A `PreToolUse` hook that prints a fixed answer: it approves the five
+  read-only Currents tools above, for the band and for Claude.
 
 ## Requirements
 
