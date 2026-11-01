@@ -354,6 +354,17 @@ test("a repository whose project the sign-in can't see says so, and falls back t
   expect(await pane.find({ key: 'project' })).toBeDefined()
 })
 
+test('session.start, which a reload runs again, asks for the band to be drawn afresh', async ($, on) => {
+  world(on)
+  const invalidated: string[] = []
+  on('ui.invalidate', ($, e) => {
+    invalidated.push(e.event)
+    return { value: undefined }
+  })
+  await start($)
+  expect(invalidated).toContain('ui.render')
+})
+
 test('with no session.start, the next prompt starts the loop', async ($, on) => {
   world(on)
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })

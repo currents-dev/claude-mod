@@ -121,7 +121,11 @@ export const register: Register = (on, options) => {
     const hidden = await $.store.get('bandHidden')
     if (typeof hidden === 'boolean') await update($, bandHidden, () => hidden)
     ensureLoop($, settings)
-    return next(e)
+    const started = await next(e)
+    // A reload runs this again before the new code has drawn anything, so the
+    // refresh's writes have no drawing to redraw until a surface next asks.
+    $.ui.invalidate('ui.render')
+    return started
   })
 
   on('command.run', { command: 'currents' }, async ($, e) => {
