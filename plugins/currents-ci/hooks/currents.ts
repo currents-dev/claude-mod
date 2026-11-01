@@ -51,9 +51,9 @@ export class CurrentsError extends Error {
   }
 }
 
-const tidy = (text: string) => {
+const tidy = (text: string, max = 160) => {
   const line = text.replace(/\s+/g, ' ').trim()
-  return line.length > 160 ? `${line.slice(0, 159)}…` : line
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line
 }
 
 const REFUSED = "This session's permissions stopped the band reading Currents."
@@ -99,8 +99,23 @@ const parse = (text: string): unknown => {
         // fall through
       }
     }
-    throw new CurrentsError('Currents sent a reply the mod could not read.', 'api')
+    throw new CurrentsError(`Currents sent a reply the mod could not read: "${tidy(text, 60)}"`, 'api')
   }
+}
+
+/**
+ * Where the engine saved a reply over its MCP output limit (`MAX_MCP_OUTPUT_TOKENS`),
+ * read from the note it hands back instead: a file in the session's
+ * `tool-results` named for the tool. A run of a project with many groups
+ * runs to tens of thousands of characters.
+ */
+export const savedReply = (text: string, tool: string): string | null => {
+  if (!/exceeds maximum allowed tokens/i.test(text)) return null
+  const rest = /saved to\s+[`'"]?([^\n]+)/i.exec(text)?.[1] ?? ''
+  const path = /^(.*?\.(?:txt|json))(?!\w)/i.exec(rest)?.[1]
+  if (path === undefined) return null
+  const name = path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
+  return /[\\/]tool-results[\\/]/.test(path) && name.includes(tool) ? path : null
 }
 
 export async function callTool(
@@ -117,7 +132,11 @@ export async function callTool(
   }
   const text = result.content.map(block => (block.type === 'text' ? (block.text ?? '') : '')).join('\n')
   if (result.isError) throw classify(text)
-  return parse(text)
+  const saved = savedReply(text, tool)
+  if (saved === null) return parse(text)
+  const whole = await $.fs.read(saved).catch(() => null)
+  if (whole === null) throw new CurrentsError('Currents sent a reply too large for the mod to read.', 'api')
+  return parse(whole)
 }
 
 /** MCP servers whose Currents tools the engine described this session (ToolSearch can keep them out of a list). */
@@ -189,8 +208,9 @@ export async function fetchRuns(
   server: string,
   projectId: string,
   filter: { branches?: string[]; authors?: string[] },
+  limit: number,
 ): Promise<Run[]> {
-  return listOf(await callTool($, server, 'currents-get-runs', { projectId, limit: 12, ...filter }))
+  return listOf(await callTool($, server, 'currents-get-runs', { projectId, limit, ...filter }))
     .map(toRun)
     .filter(run => run.runId !== '')
 }
@@ -206,7 +226,9 @@ export async function fetchPullRequests(
   const body = await callTool($, server, 'currents-list-pull-requests', {
     projectId,
     limit: 25,
-    runs_per_pr: 1,
+    // The mod reads each card's latestRun and recentRuns; the timeline preview
+    // would repeat the latest run, groups and all, and double the reply.
+    runs_per_pr: 0,
     ...filter,
   })
   return listOf(body)

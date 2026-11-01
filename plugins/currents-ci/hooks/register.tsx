@@ -33,7 +33,9 @@ const quietly = (work: Promise<unknown>) => work.catch(() => undefined)
 /** A command that publishes the branch, after which CI starts a run. */
 const PUSH = /\bgit\s+(?:-\S+\s+)*push\b|\bgh\s+pr\s+(?:create|ready)\b/
 
-async function openPane($: Engine) {
+/** Opens the drawer: at the project picker with `isPicking`, else at the run, even where the picker was left open. */
+async function openPane($: Engine, isPicking = false) {
+  await update($, view, (v): View => ({ ...v, isPicking }))
   const opened = await $.ui.open({ id: PANE, title: 'Currents', columns: 76, rows: 24 })
   void quietly(ensureDetail($, shownRun(normalize(await read($, snapshot)), await read($, view))))
   return opened
@@ -90,6 +92,7 @@ async function statusLine($: Engine) {
 function actionsFor($: Engine, settings: Options): Actions {
   return {
     open: () => void quietly(openPane($)),
+    choose: () => void quietly(openPane($, true)),
     signIn: surface => void quietly(openSignIn($, surface)),
     retry: () => void quietly(retry($, settings)),
     refresh: () => void quietly(refresh($, settings).then(() => schedule($, settings))),
@@ -166,8 +169,7 @@ export const register: Register = (on, options) => {
       return { text: lines.filter(Boolean).join('\n') }
     }
     if (arg === 'project') {
-      await update($, view, (v): View => ({ ...v, isPicking: true }))
-      await openPane($)
+      await openPane($, true)
       return { text: 'Choose the project in the Currents drawer.' }
     }
     if (arg === 'band') {

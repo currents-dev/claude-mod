@@ -29,7 +29,10 @@ import { historyBars, outcomeSegments, progressSegments, runDots, stackedBar, te
 export type Ui = Elements[RenderSurface]
 
 export type Actions = {
+  /** Opens the drawer at the run. */
   open: () => void
+  /** Opens the drawer at the project picker. */
+  choose: () => void
   signIn: (surface: RenderSurface) => void
   retry: () => void
   refresh: () => void
@@ -49,6 +52,9 @@ export type Actions = {
 const isBlocked = (s: Snapshot) => s.allow.length > 0 && s.error !== null && s.updatedAt === null
 
 export const CLAUDE_DIRECTORY = 'https://claude.ai/directory/currents'
+
+/** How long refreshes may fail before the band says its news is old: a blip passes unremarked. */
+const STALE_AFTER_MS = 2 * 60_000
 
 /** CSS pixels per cell on a surface that draws SVG, for sizing a chart to the pane. */
 const CELL_PX = 7.5
@@ -211,14 +217,7 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
           labels: ['Sign in again', 'Choose'],
           nodes: [
             <Button key="sign-in" variant="primary" label="Sign in again" onPress={press => actions.signIn(press.surface)} />,
-            <Button
-              key="choose"
-              label="Choose"
-              onPress={() => {
-                actions.picking(true)
-                actions.open()
-              }}
-            />,
+            <Button key="choose" label="Choose" onPress={actions.choose} />,
           ],
         },
       )
@@ -226,16 +225,7 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
     const ask = s.repo === null ? ' · Choose your Currents project' : ' · Choose the Currents project this repository records to'
     return row([brand, { text: ask, dim: true }], {
       labels: ['Choose'],
-      nodes: [
-        <Button
-          key="choose"
-          label="Choose"
-          onPress={() => {
-            actions.picking(true)
-            actions.open()
-          }}
-        />,
-      ],
+      nodes: [<Button key="choose" label="Choose" onPress={actions.choose} />],
     })
   }
 
@@ -287,6 +277,11 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
         { text: ` ${ago(base.createdAt, now)}`, dim: true, drop: 3 },
       )
     }
+  }
+
+  // Refreshes failing for a while: say how old the news is rather than pass it off as current.
+  if (s.error !== null && s.updatedAt !== null && now - s.updatedAt > STALE_AFTER_MS) {
+    segs.push({ text: ` · ⚠ updated ${ago(s.updatedAt, now)}`, color: 'warning', drop: 1 })
   }
 
   const others = otherPrs(s)
@@ -889,7 +884,12 @@ const drawFooter = (ui: Ui, input: PaneInput): RenderElement => {
   const active = [s.branchRuns[0], ...s.prs.map(pr => pr.latest)].some(run => run !== undefined && isActive(run))
   const parts = [
     s.updatedAt !== null ? `Updated ${ago(s.updatedAt, now)}` : null,
-    c.state === 'connected' ? (active ? 'refreshing every 15s while runs are in progress' : 'refreshing every minute') : null,
+    // Failing, it retries less and less often.
+    c.state !== 'connected' || s.error !== null
+      ? null
+      : active
+        ? 'refreshing every 15s while runs are in progress'
+        : 'refreshing every minute',
     s.projectSource === 'repo' ? 'project found in the repo config' : null,
     s.projectSource === 'remote' ? "project matched by the repo's runs" : null,
     s.projectSource === 'mine' ? 'project of your latest run' : null,

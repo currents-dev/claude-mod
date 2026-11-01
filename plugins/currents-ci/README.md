@@ -157,7 +157,12 @@ latest pull requests.
   ids in Currents config and CI files, and your git user name.
 - `gh pr list` for your open pull requests, every two minutes at most.
 - Currents, only through the Currents connector (or your Currents MCP server).
-  It reads results and projects and changes nothing.
+  It reads results and projects and changes nothing. A run of a project with
+  many groups is large, so each refresh reads the branch's newest run alone,
+  and its history only once a new run starts.
+- A reply over Claude Code's MCP output limit (`MAX_MCP_OUTPUT_TOKENS`), which
+  Claude Code saves to a file in the session's `tool-results` folder: the
+  plugin reads that file.
 - A `PreToolUse` hook that prints a fixed answer: it approves the five
   read-only Currents tools above, for the band and for Claude.
 

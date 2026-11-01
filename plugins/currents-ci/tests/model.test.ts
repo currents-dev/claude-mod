@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { allowRules, classify } from '../hooks/currents'
+import { allowRules, classify, savedReply } from '../hooks/currents'
 import {
   ago,
   duration,
@@ -148,6 +148,19 @@ describe('words and helpers', () => {
     expect(
       classify('currents-ci: $.mcp.call: no connected MCP tool "currents-get-runs" on a server named "claude_ai_Currents"').kind,
     ).toBe('disconnected')
+  })
+
+  test("finds the file the engine saved a reply over its MCP output limit to, and no other", async () => {
+    const path =
+      'C:\\Users\\Ada Lovelace\\.claude\\projects\\C--Users-ada\\74e20eb3\\tool-results\\mcp-3fb6525c-f3dd-4d77-ba6b-ffa7031a8a00-currents-list-pull-requests-1793498356709.txt'
+    // The engine's note, as Claude Code 2.1.314 words it.
+    const note = (at: string) =>
+      `Error: result (108,408 characters across 3,736 lines) exceeds maximum allowed tokens. Output has been saved to ${at}.\nFormat: Plain text\n- For targeted searches (find a line, locate a string): use grep on the file directly.`
+    expect(savedReply(note(path), 'currents-list-pull-requests')).toBe(path)
+    expect(savedReply(note(path).replace('.\n', ' and can be read in parts.\n'), 'currents-list-pull-requests')).toBe(path)
+    expect(savedReply(note(path), 'currents-get-runs')).toBeNull()
+    expect(savedReply(note('C:\\Users\\ada\\secrets\\currents-list-pull-requests.txt'), 'currents-list-pull-requests')).toBeNull()
+    expect(savedReply(`Output has been saved to ${path}.`, 'currents-list-pull-requests')).toBeNull()
   })
 })
 

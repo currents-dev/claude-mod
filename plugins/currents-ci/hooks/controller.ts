@@ -168,9 +168,13 @@ async function load($: Engine, options: Options) {
 
     const { projectId, defaultBranch } = choice.project
     const branch = repo?.branch ?? null
+    const scope = branch !== null ? 'branch' : 'mine'
     const runsFilter = branch !== null ? { branches: [branch] } : author ? { authors: [author] } : null
+    const isSameList = before.project?.projectId === projectId && before.repo?.branch === branch && before.scope === scope
     const [branchRuns, prs] = await Promise.all([
-      runsFilter === null ? Promise.resolve([]) : fetchRuns($, connection.server, projectId, runsFilter),
+      runsFilter === null
+        ? Promise.resolve([])
+        : runsOf($, connection.server, projectId, runsFilter, isSameList ? before.branchRuns : []),
       pullRequestsOf($, connection.server, projectId, repo, author, options, now),
     ])
     // A branch with no run yet: show how the default branch stands instead.
@@ -187,7 +191,7 @@ async function load($: Engine, options: Options) {
       unseen: [],
       projectSource: choice.source,
       branchRuns,
-      scope: branch !== null ? 'branch' : 'mine',
+      scope,
       baseRun,
       prs: prs.cards,
       quietPrs: prs.quiet,
@@ -231,6 +235,30 @@ async function load($: Engine, options: Options) {
           : s.connection,
     }))
   }
+}
+
+/** How many of a branch's runs the drawer's history lists. */
+const HISTORY = 12
+
+/**
+ * The branch's runs, newest first. A refresh reads the newest alone, as a run
+ * of a project with many groups is large; the history again only once a new
+ * run starts, or while an older one is still in progress.
+ */
+async function runsOf(
+  $: Engine,
+  server: string,
+  projectId: string,
+  filter: { branches?: string[]; authors?: string[] },
+  known: Run[],
+): Promise<Run[]> {
+  const [first, ...rest] = known
+  if (first !== undefined && !rest.some(isActive)) {
+    const [newest] = await fetchRuns($, server, projectId, filter, 1)
+    if (newest === undefined) return []
+    if (newest.runId === first.runId) return [newest, ...rest]
+  }
+  return fetchRuns($, server, projectId, filter, HISTORY)
 }
 
 /** Polls quickly while a run is in progress or a push awaits its run, slowly otherwise, and backs off on errors. */

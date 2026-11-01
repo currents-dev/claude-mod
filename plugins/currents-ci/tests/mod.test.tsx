@@ -50,6 +50,7 @@ type World = {
   calls: string[]
   servers: string[]
   runFilters: Record<string, unknown>[]
+  prFilters: Record<string, unknown>[]
   filled: string[]
   /** The projects the sign-in sees; the fixtures' two when absent. */
   projects?: unknown
@@ -60,6 +61,12 @@ type World = {
   /** Currents calls hang, as one held for an approval nobody is shown, until released. */
   stalls?: boolean
   held: (() => void)[]
+  /** Tools whose replies run over the engine's MCP output limit: it saves them to a file and answers with a note. */
+  oversize?: string[]
+  /** The files the engine saved those replies to, by path. */
+  saved: Record<string, string>
+  /** Currents answers with text that is not JSON, as a proxy's error page. */
+  garbles?: boolean
   toasts: string[]
   /** The plugin's `$.store`. */
   stored: Record<string, unknown>
@@ -82,10 +89,12 @@ const world = (on: On, init: Partial<World> = {}): World => {
     calls: [],
     servers: [],
     runFilters: [],
+    prFilters: [],
     filled: [],
     held: [],
     toasts: [],
     stored: {},
+    saved: {},
     ...init,
   }
   w.clock = mock.clock(on, { now: NOW })
@@ -139,26 +148,38 @@ const world = (on: On, init: Partial<World> = {}): World => {
     }
     if (w.refuses !== undefined) return { deny: `currents-ci: $.mcp.call(${e.server}, ${e.tool}) refused: ${w.refuses}` }
     if (w.stalls) await new Promise<void>(resolve => w.held.push(resolve))
+    if (w.garbles) return { value: { content: [{ type: 'text', text: '<html><title>502 Bad Gateway</title></html>' }], isError: false } }
+    const reply = (body: unknown) => {
+      if (!w.oversize?.includes(e.tool)) return text(body)
+      const json = JSON.stringify(body, null, 2)
+      const path = `C:\\Users\\ada\\.claude\\projects\\C--work-web\\5e55-1on\\tool-results\\mcp-${e.server}-${e.tool}-${Object.keys(w.saved).length}.txt`
+      w.saved[path] = json
+      const note = `Error: result (${json.length} characters across ${json.split('\n').length} lines) exceeds maximum allowed tokens. Output has been saved to ${path}.\nFormat: JSON with schema: {status: string, data: [...]}\nUse offset and limit parameters to read specific portions of the file.`
+      return { value: { content: [{ type: 'text', text: note }], isError: false } }
+    }
     switch (e.tool) {
       case 'currents-get-projects':
-        return text(w.projects ?? projects)
+        return reply(w.projects ?? projects)
       case 'currents-get-runs': {
         w.runFilters.push(e.args)
         const branches = (e.args.branches as string[] | undefined) ?? []
-        if (branches.includes('main')) return text(ok([passedPrRun_onMain]))
-        if (branches.length > 0 && !w.branchHasRuns) return text(ok([]))
-        return text(branchRuns(w.latest))
+        if (branches.includes('main')) return reply(ok([passedPrRun_onMain]))
+        if (branches.length > 0 && !w.branchHasRuns) return reply(ok([]))
+        const runs = branchRuns(w.latest)
+        return reply({ ...runs, data: (runs.data as unknown[]).slice(0, Number(e.args.limit ?? 10)) })
       }
       case 'currents-list-pull-requests':
-        return text(pullRequests)
+        w.prFilters.push(e.args)
+        return reply(pullRequests)
       case 'currents-get-run-details':
-        return text(runDetails)
+        return reply(runDetails)
       case 'currents-get-context':
-        return text(context)
+        return reply(context)
       default:
         return { value: { content: [{ type: 'text', text: `unknown tool ${e.tool}` }], isError: true } }
     }
   })
+  on('fs.read', ($, e) => (e.path in w.saved ? { value: w.saved[e.path] ?? '' } : { deny: `ENOENT: no such file, open '${e.path}'` }))
   on('process.run', ($, e) => {
     const argv = e.argv.join(' ')
     const out = (stdout: string, exitCode = 0) => ({
@@ -467,4 +488,59 @@ test('a refresh that never hears back says so after a minute, and offers the rul
   w.stalls = false
   for (const release of w.held) release()
   await submitted
+})
+
+test("a reply over the engine's MCP output limit is read whole from the file the engine saved it to", async ($, on) => {
+  const w = world(on, { oversize: ['currents-get-runs', 'currents-list-pull-requests'] })
+  await start($)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const line = await band.find({ type: 'Text', text: /fix-login/ })
+  expect(line?.text).toContain('3 failed, 2 flaky')
+  expect(line?.text).toContain('1 other PR')
+  expect(Object.keys(w.saved).length).toBeGreaterThan(1)
+})
+
+test('a reply that is not JSON is quoted, and the band says how old its news is once refreshes keep failing', async ($, on) => {
+  const w = world(on)
+  await start($)
+  w.garbles = true
+  await w.clock?.advance(3 * 60_000)
+  await w.clock?.settle()
+  await refresh($)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const line = await band.find({ type: 'Text', text: /fix-login/ })
+  expect(line?.text).toContain('3 failed, 2 flaky')
+  expect(line?.text).toContain('⚠ updated 3m ago')
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await pane.find({ type: 'Text', text: /Last refresh failed: .*could not read: "<html><title>502 Bad Gateway/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /refreshing every/ })).toBeUndefined()
+})
+
+test("each refresh reads the branch's newest run alone, and its history once a new run starts", async ($, on) => {
+  const w = world(on)
+  await start($)
+  expect(w.runFilters.map(filter => filter.limit)).toEqual([12])
+  // The PR cards leave out the timeline preview, which repeats the latest run.
+  expect(w.prFilters.every(filter => filter.runs_per_pr === 0)).toBe(true)
+
+  await refresh($)
+  expect(w.runFilters.map(filter => filter.limit)).toEqual([12, 1])
+
+  w.latest = runningRun
+  await refresh($)
+  expect(w.runFilters.map(filter => filter.limit)).toEqual([12, 1, 1, 12])
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await band.find({ type: 'Text', text: /fix-login/ }))?.text).toContain('Running')
+})
+
+test('Open shows the run, even where the project picker was left open', async ($, on) => {
+  world(on)
+  await start($)
+  await currents($, 'project')
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await pane.find({ key: 'project' })).toBeDefined()
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'open' })
+  expect(await pane.find({ key: 'project' })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: 'Fix the login redirect loop' })).toBeDefined()
 })
