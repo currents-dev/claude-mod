@@ -3,7 +3,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^mcp__.+__currents-(get-projects|get-runs|list-pull-requests|get-run-details|get-context)$",
+        "matcher": "^mcp__.+__currents-(get-projects|get-runs|get-run-details|get-context|get-tests-performance)$",
         "hooks": [
           {
             "type": "command",

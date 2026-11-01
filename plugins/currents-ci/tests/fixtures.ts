@@ -51,6 +51,31 @@ export const failedRun = {
   ],
 }
 
+/** The same commit as `failedRun`, built again: its flaky test passed on the retry. */
+export const rerunRun = {
+  ...failedRun,
+  runId: 'run-failed-0',
+  createdAt: iso(30),
+  durationMs: 330_000,
+  status: 'PASSED',
+  meta: { ...failedRun.meta, ciBuildId: 'gha-991-2' },
+  groups: [group('chromium', { total: 210, passes: 210, failures: 0, flaky: 2 }, { overall: 26, complete: 26 })],
+}
+
+/** An earlier build on the branch, of an earlier commit, by someone else. */
+export const olderRun = {
+  ...failedRun,
+  runId: 'run-fix-0',
+  createdAt: iso(300),
+  durationMs: 310_000,
+  meta: {
+    ...failedRun.meta,
+    ciBuildId: 'gha-980-1',
+    commit: { sha: '7e6d5c4b3a291807', branch: 'fix-login', authorName: 'Grace Hopper', message: 'wip: redirect' },
+  },
+  groups: [group('chromium', { total: 210, passes: 206, failures: 4 }, { overall: 26, complete: 26 })],
+}
+
 export const runningRun = {
   ...failedRun,
   runId: 'run-running-2',
@@ -75,6 +100,21 @@ export const passedPrRun = {
   groups: [group('chromium', { total: 180, passes: 180, failures: 0 }, { overall: 20, complete: 20 })],
 }
 
+/** The default branch's newest run, green: the baseline the branch's failures are compared with. */
+export const mainRun = {
+  ...passedPrRun,
+  runId: 'run-main-9',
+  meta: { ...passedPrRun.meta, pr: null, commit: { ...passedPrRun.meta.commit, branch: 'main', message: 'chore: release' } },
+}
+
+/** The default branch's newest run when it fails the test the branch fails too. */
+export const mainFailedRun = {
+  ...mainRun,
+  runId: 'run-main-8',
+  status: 'FAILED',
+  groups: [group('chromium', { total: 180, passes: 179, failures: 1, flaky: 1 }, { overall: 20, complete: 20 })],
+}
+
 export const ok = (data: unknown, more: Record<string, unknown> = {}) => ({ status: 'OK', ...more, data })
 
 export const projects = ok([
@@ -82,36 +122,11 @@ export const projects = ok([
   { projectId: 'Zzz999', name: 'Mobile', createdAt: iso(100_000) },
 ])
 
-export const branchRuns = (latest: unknown) => ok([latest, failedRun], { has_more: false })
-
-export const pullRequests = ok(
-  [
-    {
-      pr: { id: 'github:github.com/acme/web#42', prNumber: '42', link: 'https://github.com/acme/web/pull/42', title: 'Fix the login redirect loop', source: 'fix-login', destination: 'main', repository: 'acme/web' },
-      stats: { total: 2, passed: 0, failed: 1, running: 0, failing: 0, canceled: 0, timedOut: 0 },
-      latestRun: failedRun,
-      timelinePreview: [failedRun],
-      recentRuns: [{ runId: failedRun.runId, createdAt: failedRun.createdAt, status: 'FAILED', completionState: 'COMPLETE', durationMs: 400_000, commit: { sha: '4f2c1d9', message: 'fix', authorName: 'Ada' }, failures: 3 }],
-      hasMoreRuns: false,
-      cursor: 'c1',
-      stackedOn: null,
-    },
-    {
-      pr: { id: 'github:github.com/acme/web#77', prNumber: '77', link: 'https://github.com/acme/web/pull/77', title: 'Add CSV export', source: 'csv-export', destination: 'main', repository: 'acme/web' },
-      stats: { total: 3, passed: 2, failed: 1, running: 0, failing: 0, canceled: 0, timedOut: 0 },
-      latestRun: passedPrRun,
-      timelinePreview: [passedPrRun],
-      recentRuns: [
-        { runId: 'run-pr-77', createdAt: iso(90), status: 'PASSED', completionState: 'COMPLETE', durationMs: 300_000, commit: { sha: '1111111', message: 'csv', authorName: 'Ada' }, failures: 0 },
-        { runId: 'run-pr-76', createdAt: iso(200), status: 'FAILED', completionState: 'COMPLETE', durationMs: 310_000, commit: { sha: '2222222', message: 'csv', authorName: 'Ada' }, failures: 4 },
-      ],
-      hasMoreRuns: false,
-      cursor: 'c2',
-      stackedOn: null,
-    },
-  ],
-  { has_more: false },
-)
+/** The branch's runs as `currents-get-runs` lists them, newest first, with `latest` the newest. */
+export const branchRuns = (latest: unknown) => {
+  const newest = (latest as { runId: string }).runId
+  return ok([latest, ...[failedRun, rerunRun, olderRun].filter(run => run.runId !== newest)], { has_more: false })
+}
 
 export const runDetails = ok({
   ...failedRun,
@@ -156,8 +171,83 @@ export const context = ok({
   nextPage: false,
 })
 
-export const OPEN_PRS = JSON.stringify([
-  { number: 42, headRefName: 'fix-login', title: 'Fix the login redirect loop', isDraft: false },
-  { number: 77, headRefName: 'csv-export', title: 'Add CSV export', isDraft: false },
-  { number: 80, headRefName: 'docs-tweak', title: 'Tweak the docs', isDraft: true },
-])
+/** `currents-get-context` for a run whose only problem is a test that passed on a retry. */
+export const flakyContext = ok({
+  level: 'run',
+  runId: rerunRun.runId,
+  runStatus: 'PASSED',
+  instances: [],
+  list: [
+    {
+      testId: 't-2',
+      instanceId: 'i-3',
+      spec: 'tests/profile.spec.ts',
+      title: ['Profile', 'saves the avatar'],
+      status: 'flaky',
+      attempt: 1,
+      duration: 1_800,
+      error: { message: 'TimeoutError: locator.click: Timeout 5000ms exceeded.' },
+    },
+  ],
+  count: 1,
+  total: 0,
+  totalFlakyTests: 1,
+  nextPage: false,
+})
+
+/** `currents-get-tests-performance` ordered by flakiness: the Tests tab's flakiest rows for the branch. */
+export const flakiestTests = ok({
+  list: [
+    {
+      title: 'saves the avatar',
+      spec: 'tests/profile.spec.ts',
+      metrics: { executions: 8, failures: 1, flaky: 1, flakinessRate: 0.125, avgDurationMs: 1_800 },
+      lastSeen: iso(11),
+    },
+  ],
+  count: 1,
+  total: 1,
+  nextPage: false,
+})
+
+/** The same endpoint ordered by duration: the branch's slowest rows. */
+export const slowestTests = ok({
+  list: [
+    {
+      title: 'exports every order as CSV',
+      spec: 'tests/checkout.spec.ts',
+      metrics: { executions: 6, failures: 0, flaky: 0, flakinessRate: 0, avgDurationMs: 95_000 },
+      lastSeen: iso(40),
+    },
+  ],
+  count: 1,
+  total: 1,
+  nextPage: false,
+})
+
+/** `gh pr view --json number,title,url,isDraft,reviewDecision,baseRefName`, for the checked-out branch. */
+export const PR_VIEW = JSON.stringify({
+  number: 42,
+  title: 'Fix the login redirect loop',
+  url: 'https://github.com/acme/web/pull/42',
+  isDraft: false,
+  reviewDecision: 'APPROVED',
+  baseRefName: 'main',
+})
+
+export const PR_VIEW_DRAFT = JSON.stringify({
+  number: 42,
+  title: 'Fix the login redirect loop',
+  url: 'https://github.com/acme/web/pull/42',
+  isDraft: true,
+  reviewDecision: '',
+  baseRefName: 'main',
+})
+
+/** `currents-create-share-link`'s reply for a report. */
+export const shareLink = {
+  purpose: 'report',
+  url: 'https://currents.dev/s/9f1c2b7e',
+  pageUrl: 'https://app.currents.dev/shared/9f1c2b7e',
+  expiresAt: iso(-7 * 24 * 60),
+}

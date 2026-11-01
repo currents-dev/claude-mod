@@ -1,6 +1,6 @@
 // SVG for the surfaces that draw it (Desktop, VS Code, mobile); the terminal gets block characters instead.
 
-import type { Run, RecentRun } from '../types'
+import type { Run } from '../types'
 import { COUNTER, VERDICT, verdictOf, failedCount } from './model'
 
 const TRACK = '#8b8b8b33'
@@ -39,15 +39,16 @@ export const progressSegments = (run: Run): Segment[] => [
   { value: Math.max(0, run.specs.claimed - run.specs.complete), hex: `${VERDICT[verdictOf(run)].hex}66` },
 ]
 
-/** The pull requests page's "last 10 runs" dots, oldest on the left. */
-export const runDots = (runs: RecentRun[], size = 12, gap = 4): string => {
+/** The branch's last 10 builds as dots, oldest on the left. */
+export const runDots = (runs: Run[], size = 12, gap = 4): string => {
   const list = runs.slice(0, 10).reverse()
   const width = Math.max(size, list.length * (size + gap) - gap)
   const dots = list
     .map((run, index) => {
       const verdict = VERDICT[verdictOf(run)]
       const x = index * (size + gap)
-      const label = `${verdict.label}${run.failures > 0 ? ` · ${run.failures} failed` : ''}${run.sha ? ` · ${run.sha.slice(0, 7)}` : ''}`
+      const failed = failedCount(run.tests)
+      const label = `${verdict.label}${failed > 0 ? ` · ${failed} failed` : ''}${run.sha ? ` · ${run.sha.slice(0, 7)}` : ''}`
       return `<g><title>${escapeXml(label)}</title><rect x="${x}" y="0" width="${size}" height="${size}" rx="3" fill="${verdict.hex}"/></g>`
     })
     .join('')

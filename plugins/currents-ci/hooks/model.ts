@@ -3,13 +3,12 @@
 import type {
   CompletionState,
   FailedTest,
-  PullRequest,
-  RecentRun,
   Run,
   RunDetail,
   RunStatus,
   SpecRow,
   TestCounts,
+  TestStat,
   Verdict,
 } from '../types'
 
@@ -57,7 +56,7 @@ const titleOf = (meta: Json, runId: string): string => {
   )
 }
 
-/** One run from `currents-get-runs`, a PR card's `latestRun` or `currents-get-run-details`. */
+/** One run from `currents-get-runs`, or the run a `currents-get-run-details` reply describes. */
 export const toRun = (raw: unknown): Run => {
   const run = obj(raw)
   const meta = obj(run.meta)
@@ -102,41 +101,12 @@ export const toRun = (raw: unknown): Run => {
     ciBuildId: str(meta.ciBuildId),
     prNumber: prNumberOf(prId),
     prLink: str(pr.link),
+    prBase: str(pr.destination),
     framework: frameworkName === null ? null : [frameworkName, str(framework.version)].filter(Boolean).join(' '),
     tags: arr(run.tags).filter((tag): tag is string => typeof tag === 'string'),
     groups: groups.length,
     tests,
     specs,
-  }
-}
-
-const toRecentRun = (raw: unknown): RecentRun => {
-  const run = obj(raw)
-  return {
-    runId: str(run.runId) ?? '',
-    createdAt: str(run.createdAt) ?? new Date(0).toISOString(),
-    status: status(run.status),
-    completionState: completion(run.completionState),
-    durationMs: numOrNull(run.durationMs),
-    failures: num(run.failures),
-    sha: str(obj(run.commit).sha),
-  }
-}
-
-/** One card from `currents-list-pull-requests`. */
-export const toPullRequest = (raw: unknown): PullRequest => {
-  const card = obj(raw)
-  const pr = obj(card.pr)
-  const id = str(pr.id) ?? ''
-  return {
-    id,
-    number: str(pr.prNumber) ?? prNumberOf(id),
-    title: str(pr.title),
-    link: str(pr.link),
-    source: str(pr.source),
-    destination: str(pr.destination),
-    latest: toRun(card.latestRun),
-    recent: arr(card.recentRuns).map(toRecentRun).filter(run => run.runId !== ''),
   }
 }
 
@@ -225,6 +195,23 @@ export const toDetail = (runRaw: unknown, contextRaw: unknown): RunDetail => {
     error: null,
   }
 }
+
+/** One test's row from `currents-get-tests-performance`: the Test Explorer's rows, for the branch. */
+export const toTestStats = (raw: unknown): TestStat[] =>
+  arr(obj(obj(raw).data ?? raw).list).map((item): TestStat => {
+    const test = obj(item)
+    const metrics = obj(test.metrics)
+    return {
+      title: str(test.title) ?? 'untitled test',
+      spec: str(test.spec) ?? '',
+      executions: num(metrics.executions),
+      failures: num(metrics.failures),
+      flaky: num(metrics.flaky),
+      flakinessRate: num(metrics.flakinessRate),
+      avgDurationMs: numOrNull(metrics.avgDurationMs),
+      lastSeen: str(test.lastSeen),
+    }
+  })
 
 /** The list a paginated endpoint answers (`{ status, has_more, data }`), or the array itself. */
 export const listOf = (body: unknown): unknown[] => (Array.isArray(body) ? body : arr(obj(body).data))
@@ -330,6 +317,16 @@ export const progressOf = (run: Run): number | null => {
 export const clip = (text: string, width: number): string =>
   width <= 0 ? '' : text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}…`
 
+/** A test's identity across runs: its spec and title path. Test ids change between runs of a project; titles do not. */
+export const testKeyOf = (test: Pick<FailedTest, 'spec' | 'title'>): string => `${test.spec}|${test.title.join(' › ')}`
+
+/** The failing tests of a run that its baseline run (the default branch's) does not fail too; null until the baseline is known. */
+export const newFailures = (detail: RunDetail, baseline: RunDetail | undefined): FailedTest[] | null => {
+  if (baseline === undefined || baseline.error !== null) return null
+  const onBaseline = new Set(baseline.failed.map(testKeyOf))
+  return detail.failed.filter(test => !test.isFlaky && !onBaseline.has(testKeyOf(test)))
+}
+
 // ---- Links ----
 
 export const runUrl = (runId: string, tab?: 'errors' | 'specs' | 'progress') =>
@@ -346,32 +343,84 @@ export const testUrl = (runId: string, test: Pick<FailedTest, 'testId' | 'instan
 export const branchRunsUrl = (projectId: string, branch: string) =>
   `${DASHBOARD}/projects/${encodeURIComponent(projectId)}/runs?branch=${encodeURIComponent(branch)}`
 
-export const pullRequestsUrl = (projectId: string) =>
-  `${DASHBOARD}/projects/${encodeURIComponent(projectId)}/pull-requests`
+// ---- The prompts "Fix with Claude" and the Tests tab draft ----
 
-// ---- The prompt "Fix with Claude" drafts ----
+const DETAIL_ITEMS = 8
 
-export const fixPrompt = (run: Run, detail: RunDetail | undefined): string => {
+/** One failing or flaky test as the prompt lists it: its path, where, and the first lines of its error. */
+const testLines = (test: FailedTest, index: number): string[] => {
+  const lines = [`${index + 1}. ${[test.spec, ...test.title].filter(Boolean).join(' › ')}`]
+  if (test.location) lines.push(`   at ${test.location}`)
+  if (test.error) lines.push(...test.error.split('\n').map(line => `   ${line}`))
+  return lines
+}
+
+/**
+ * The prompt the run's Fix with Claude button drafts. `fresh` is the failures
+ * this branch alone has (null when the default branch's run is not known) and
+ * `baseline` the default branch's name.
+ */
+export const fixPrompt = (
+  run: Run,
+  detail: RunDetail | undefined,
+  fresh: FailedTest[] | null,
+  baseline: string | null,
+): string => {
   const failed = failedCount(run.tests)
+  const flaky = run.tests.flaky
+  const failing = detail?.failed.filter(test => !test.isFlaky) ?? []
+  const flakyTests = detail?.failed.filter(test => test.isFlaky) ?? []
   const lines = [
     `The Currents run for ${run.branch ? `branch \`${run.branch}\`` : 'this branch'} ${
-      isActive(run) ? 'is failing' : 'failed'
-    }: ${plural(failed, 'failed test')}${run.tests.flaky > 0 ? `, ${run.tests.flaky} flaky` : ''} (${run.title}).`,
+      isActive(run) ? 'is failing' : run.status === 'PASSED' ? 'passed' : 'failed'
+    }: ${failed > 0 ? plural(failed, 'failed test') : 'no failed tests'}${flaky > 0 ? `, ${flaky} flaky` : ''} (${run.title}).`,
     `Run: ${runUrl(run.runId)} (run_id \`${run.runId}\`)`,
   ]
-  const tests = detail?.failed.filter(test => !test.isFlaky) ?? []
-  if (tests.length > 0) {
+  if (fresh && baseline && failing.length > 0) {
+    lines.push(
+      fresh.length === 0
+        ? `Every failing test also fails on ${baseline}.`
+        : fresh.length === failing.length
+          ? `None of the failing tests fail on ${baseline}: all are new on this branch.`
+          : `${fresh.length} of the ${failing.length} failing tests are new on this branch; the others also fail on ${baseline}.`,
+    )
+  }
+  if (failing.length > 0) {
     lines.push('', 'Failed tests:')
-    tests.slice(0, 8).forEach((test, index) => {
-      lines.push(`${index + 1}. ${[test.spec, ...test.title].filter(Boolean).join(' › ')}`)
-      if (test.location) lines.push(`   at ${test.location}`)
-      if (test.error) lines.push(...test.error.split('\n').map(line => `   ${line}`))
-    })
-    if (detail && detail.failedTotal > tests.length) lines.push(`…and ${detail.failedTotal - tests.length} more.`)
+    failing.slice(0, DETAIL_ITEMS).forEach((test, index) => lines.push(...testLines(test, index)))
+    if (detail && detail.failedTotal > Math.min(failing.length, DETAIL_ITEMS)) {
+      lines.push(`…and ${detail.failedTotal - Math.min(failing.length, DETAIL_ITEMS)} more.`)
+    }
+  }
+  if (flakyTests.length > 0) {
+    lines.push('', 'Flaky tests (they passed on a retry):')
+    flakyTests.slice(0, DETAIL_ITEMS).forEach((test, index) => lines.push(...testLines(test, index)))
   }
   lines.push(
     '',
-    'Get the full errors, steps and traces with the Currents MCP tools (currents-get-context with this run_id), find the root cause in this repository, and fix it. Tell me if a failure looks unrelated to this branch.',
+    'Get the full errors, steps and traces with the Currents MCP tools (currents-get-context with this run_id), find the root cause in this repository, and fix it. Flaky tests usually need a wait, a shared state or an ordering fix. Tell me if a failure looks unrelated to this branch.',
+  )
+  return lines.join('\n')
+}
+
+/** The prompt the Tests tab drafts for the branch's flaky or slow tests. */
+export const testsPrompt = (branch: string, tests: TestStat[], sort: 'flakiness' | 'duration', days: number): string => {
+  const lines = [
+    sort === 'flakiness'
+      ? `These tests on branch \`${branch}\` were flaky in the last ${days} days:`
+      : `These are the slowest tests on branch \`${branch}\` over the last ${days} days:`,
+    '',
+  ]
+  tests.slice(0, DETAIL_ITEMS).forEach((test, index) => {
+    const stat =
+      sort === 'flakiness'
+        ? `${(test.flakinessRate * 100).toFixed(1)}% flaky over ${plural(test.executions, 'execution')}`
+        : `avg ${duration(test.avgDurationMs)} over ${plural(test.executions, 'execution')}`
+    lines.push(`${index + 1}. ${[test.spec, test.title].filter(Boolean).join(' › ')} (${stat})`)
+  })
+  lines.push(
+    '',
+    `Find out why each one ${sort === 'flakiness' ? 'flakes' : 'is slow'} in this repository, and fix it. The Currents MCP tools have each test's history (currents-get-test-results).`,
   )
   return lines.join('\n')
 }

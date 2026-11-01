@@ -7,7 +7,7 @@ dashboard for Playwright and Cypress. This repository is a plugin marketplace.
 
 | Plugin | What it does |
 | --- | --- |
-| [`currents-ci`](plugins/currents-ci) | Your Currents test runs inside Claude Code: a live status band above the prompt for the branch you are on and your open pull requests, and a drawer with the run's results, errors and spec files, laid out like the Currents dashboard. Fix with Claude drafts a prompt from a failed run. |
+| [`currents-ci`](plugins/currents-ci) | Your Currents test runs inside Claude Code: a status band above the prompt for the branch you are on, with its first failure and the failures new against main, and a drawer with the branch's runs, failures, flaky tests, share links and its pull request's builds. Fix with Claude drafts a prompt from a failed run. |
 
 ## Install
 

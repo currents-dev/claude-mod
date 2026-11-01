@@ -2,8 +2,9 @@
 
 import type { Elements, RenderElement, RenderSurface } from 'claude-code'
 
-import type { FailedTest, Project, PullRequest, Run, RunDetail, Snapshot, SpecRow, Tab, View } from '../types'
-import { isAwaitingRun, shownRun } from './controller'
+import type { FailedTest, Project, Run, RunDetail, Snapshot, SpecRow, Tab, TestSort, TestStat, View } from '../types'
+import { TEST_WINDOW_DAYS } from './currents'
+import { baselineOf, isAwaitingRun, shownRun } from './controller'
 import {
   COUNTER,
   VERDICT,
@@ -15,12 +16,13 @@ import {
   failedCount,
   failedTestsUrl,
   isActive,
+  newFailures,
   outcomeSummary,
   passRate,
   plural,
-  pullRequestsUrl,
   runUrl,
   shortSha,
+  testKeyOf,
   testUrl,
   verdictOf,
 } from './model'
@@ -41,8 +43,15 @@ export type Actions = {
   /** The drawer's Show the band: shown, in later sessions too. */
   showBand: () => void
   fix: (run: Run) => void
+  /** Drafts the prompt for the branch's flaky or slow tests, as the Tests tab lists them. */
+  fixTests: () => void
+  /** A public link to the run's report, copied. */
+  share: (run: Run) => void
+  /** A public link to one test's report, copied. */
+  shareTest: (test: FailedTest) => void
   select: (runId: string | null) => void
   tab: (tab: Tab) => void
+  testSort: (sort: TestSort) => void
   pick: (project: Project) => void
   picking: (isPicking: boolean) => void
   copy: (text: string, surface: RenderSurface) => void
@@ -93,32 +102,48 @@ const verdictSeg = (run: Pick<Run, 'status' | 'completionState'>): Seg => {
   return { text: `${meta.glyph} `, color: meta.color }
 }
 
-/** `✓2 ✗1 ●1` over pull requests' latest runs. */
-const tally = (prs: PullRequest[]): Seg[] => {
-  const counts = { passed: 0, failed: 0, active: 0, other: 0 }
-  for (const pr of prs) {
-    const verdict = verdictOf(pr.latest)
-    if (verdict === 'passed') counts.passed += 1
-    else if (verdict === 'failed' || verdict === 'timedout') counts.failed += 1
-    else if (verdict === 'running' || verdict === 'failing') counts.active += 1
-    else counts.other += 1
-  }
-  const segs: Seg[] = []
-  if (counts.passed > 0) segs.push({ text: ` ✓${counts.passed}`, color: 'success', drop: 5 })
-  if (counts.failed > 0) segs.push({ text: ` ✗${counts.failed}`, color: 'error', drop: 5 })
-  if (counts.active > 0) segs.push({ text: ` ●${counts.active}`, color: 'suggestion', drop: 5 })
-  if (counts.other > 0) segs.push({ text: ` ⊘${counts.other}`, color: 'inactive', drop: 5 })
-  return segs
+/** The two commits are the same one: their short shas agree. */
+const isSameCommit = (a: string, b: string) => a.slice(0, 7) === b.slice(0, 7)
+
+/** The failing tests a run's details list, flaky ones left out. */
+const realFailures = (detail: RunDetail | undefined) => detail?.failed.filter(test => !test.isFlaky) ?? []
+
+/** The failure a band names first: the first real one, else the first flaky one; none while the details are unread or failed to load. */
+const firstFailure = (detail: RunDetail | undefined): FailedTest | null => {
+  if (detail === undefined || detail.error !== null) return null
+  return realFailures(detail)[0] ?? detail.failed[0] ?? null
 }
 
-const otherPrs = (s: Snapshot) => {
-  const branch = s.repo?.branch ?? null
-  return s.prs.filter(pr => pr.source !== branch && pr.latest.branch !== branch)
+const nameOf = (test: FailedTest) => clip(test.title.length > 0 ? test.title.join(' › ') : test.spec, 56)
+
+/** A pull request as the drawer shows it. */
+type PullRequestShown = {
+  number: string
+  title: string | null
+  url: string | null
+  isDraft: boolean
+  review: string | null
+  base: string | null
+}
+
+/** The branch's pull request: the GitHub CLI's when it is there, else the one its runs name in Currents. */
+export const pullRequestOf = (s: Snapshot): PullRequestShown | null => {
+  if (s.pullRequest !== null) return s.pullRequest
+  const named = s.branchRuns.find(run => run.prNumber !== null)
+  if (named === undefined || named.prNumber === null) return null
+  return { number: named.prNumber, title: named.title, url: named.prLink, isDraft: false, review: null, base: named.prBase }
 }
 
 // ---- The band ----
 
-export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, actions: Actions): RenderElement | null => {
+export const drawBand = (
+  ui: Ui,
+  s: Snapshot,
+  all: Record<string, RunDetail>,
+  now: number,
+  width: number,
+  actions: Actions,
+): RenderElement | null => {
   const { Box, Button } = ui
   const Svg = 'Svg' in ui ? ui.Svg : null
   const hide = <Button key="hide" plain dimColor role="dismiss" label="×" onPress={actions.hideBand} />
@@ -247,8 +272,28 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
     }
   } else if (latest !== undefined) {
     const meta = VERDICT[verdictOf(latest)]
+    const detail = all[latest.runId]
+    const baseline = baselineOf(s, latest, all)
+    // The failures this branch alone has, once the default branch's run is read; null until then.
+    const fresh = detail === undefined || baseline === null ? null : newFailures(detail, baseline.detail)
     segs.push(verdictSeg(latest), lead, { text: clip(branch ?? latest.branch ?? latest.title, 40), bold: true })
     segs.push({ text: ' · ' }, { text: outcomeSummary(latest), color: meta.color, bold: true })
+    const first = firstFailure(detail)
+    if (first !== null) {
+      const others = (detail?.failedTotal ?? 0) + (detail?.flakyTotal ?? 0) - 1
+      const more = others > 0 ? ` +${others}` : ''
+      segs.push({ text: ` · ${nameOf(first)}${more}`, color: first.isFlaky ? COUNTER.flaky.color : 'error', drop: 1 })
+    }
+    if (fresh !== null && realFailures(detail).length > 0) {
+      segs.push(
+        fresh.length > 0
+          ? { text: ` · ${fresh.length} new`, color: 'error', bold: true, drop: 1 }
+          : { text: ' · failing on main too', dim: true, drop: 2 },
+      )
+    }
+    if (s.repo?.sha && latest.sha && !isSameCommit(s.repo.sha, latest.sha)) {
+      segs.push({ text: ` · run for ${shortSha(latest.sha)}`, color: 'warning', drop: 1 })
+    }
     if (isActive(latest)) {
       if (latest.specs.total > 0) {
         segs.push({ text: ` · ${latest.specs.complete}/${latest.specs.total} spec files`, dim: true, drop: 2 })
@@ -284,14 +329,12 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
     segs.push({ text: ` · ⚠ updated ${ago(s.updatedAt, now)}`, color: 'warning', drop: 1 })
   }
 
-  const others = otherPrs(s)
-  if (others.length > 0) {
-    segs.push({ text: `   ${plural(others.length, 'other PR')}`, dim: true, drop: 5 }, ...tally(others))
-  }
+  const pr = pullRequestOf(s)
+  if (pr !== null) segs.push({ text: ` · PR #${pr.number}${pr.isDraft ? ' draft' : ''}`, dim: true, drop: 4 })
 
   const labels: string[] = []
   const nodes: RenderElement[] = []
-  if (latest !== undefined && failedCount(latest.tests) > 0 && !isAwaitingRun(s, now)) {
+  if (latest !== undefined && (failedCount(latest.tests) > 0 || latest.tests.flaky > 0) && !isAwaitingRun(s, now)) {
     labels.push('Fix with Claude')
     nodes.push(<Button key="fix" label="Fix with Claude" onPress={() => actions.fix(latest)} />)
   }
@@ -305,7 +348,10 @@ export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, action
 export type PaneInput = {
   s: Snapshot
   v: View
+  /** The shown run's details; undefined until read. */
   detail: RunDetail | undefined
+  /** Every run's details the mod has read, for the baseline's failures. */
+  all: Record<string, RunDetail>
   now: number
   width: number
   surface: RenderSurface
@@ -399,7 +445,7 @@ const drawConnect = (ui: Ui, s: Snapshot, surface: RenderSurface, actions: Actio
       : "Sign in drafts /mcp in the prompt box: press Enter to open this session's MCP servers (also under Connectors in the session sidebar)."
   return (
     <Box flexDirection="column" rowGap={1}>
-      <Text bold>Connect Currents to see every run of your branch and pull requests here.</Text>
+      <Text bold>Connect Currents to see every run of your branch and its pull request here.</Text>
       {c.state === 'missing' && c.message !== null && <Text color="warning">{c.message}</Text>}
       {server !== null && (
         <Box flexDirection="column">
@@ -503,9 +549,15 @@ const pill = (ui: Ui, run: Pick<Run, 'status' | 'completionState'>) => {
   )
 }
 
+/** Whether a failing test is new on the branch (not failing on the default branch), or fails there too; no tag while that is unknown. */
+const tagOf = (test: FailedTest, fresh: FailedTest[] | null): 'new' | 'main' | null => {
+  if (fresh === null || test.isFlaky) return null
+  return fresh.some(item => testKeyOf(item) === testKeyOf(test)) ? 'new' : 'main'
+}
+
 const drawRunView = (ui: Ui, input: PaneInput): RenderElement => {
   const { Box, Text, Button, Link } = ui
-  const { s, v, detail, now, actions } = input
+  const { s, v, detail, actions } = input
   const run = shownRun(s, v)
   const branch = s.repo?.branch ?? null
 
@@ -517,19 +569,22 @@ const drawRunView = (ui: Ui, input: PaneInput): RenderElement => {
         </Text>
         <Text dimColor>Runs show up here once CI records the branch to {s.project?.name ?? 'Currents'}.</Text>
         {s.project !== null && branch !== null && <Link href={branchRunsUrl(s.project.projectId, branch)} label="This branch in Currents" />}
-        {s.prs.length + s.quietPrs.length > 0 && drawPullRequests(ui, input)}
+        {branch !== null && drawPullRequest(ui, input)}
       </Box>
     )
   }
 
   const errors = detail !== undefined && detail.error === null ? detail.failedTotal + detail.flakyTotal : failedCount(run.tests) + run.tests.flaky
   const specCount = detail?.specs.length ?? run.specs.total
+  const pr = pullRequestOf(s)
   const tabs: { id: Tab; label: string }[] = [
     { id: 'summary', label: 'Summary' },
     { id: 'errors', label: `Errors${errors > 0 ? ` (${errors})` : ''}` },
     { id: 'specs', label: `Spec Files${specCount > 0 ? ` (${specCount})` : ''}` },
-    { id: 'prs', label: `Pull requests${s.prs.length > 0 ? ` (${s.prs.length})` : ''}` },
+    ...(branch !== null ? [{ id: 'tests' as const, label: 'Tests' }] : []),
+    { id: 'prs', label: pr !== null ? `Pull request #${pr.number}` : 'Pull request' },
   ]
+  const tab = tabs.some(item => item.id === v.tab) ? v.tab : 'summary'
 
   return (
     <Box flexDirection="column" rowGap={1}>
@@ -539,20 +594,21 @@ const drawRunView = (ui: Ui, input: PaneInput): RenderElement => {
       {s.scope === 'mine' && <Text dimColor>Not in a git repository: your latest runs in this project.</Text>}
       {drawRunCard(ui, input, run)}
       <Box columnGap={1} flexWrap="wrap">
-        {tabs.map((tab, index) => (
+        {tabs.map((item, index) => (
           <Button
-            key={`tab-${tab.id}`}
+            key={`tab-${item.id}`}
             hotkey={String(index + 1)}
-            {...(v.tab === tab.id ? { variant: 'primary' as const } : { dimColor: true })}
-            label={tab.label}
-            onPress={() => actions.tab(tab.id)}
+            {...(tab === item.id ? { variant: 'primary' as const } : { dimColor: true })}
+            label={item.label}
+            onPress={() => actions.tab(item.id)}
           />
         ))}
       </Box>
-      {v.tab === 'summary' && drawSummary(ui, input, run)}
-      {v.tab === 'errors' && drawErrors(ui, input, run)}
-      {v.tab === 'specs' && drawSpecs(ui, input, run)}
-      {v.tab === 'prs' && drawPullRequests(ui, input)}
+      {tab === 'summary' && drawSummary(ui, input, run)}
+      {tab === 'errors' && drawErrors(ui, input, run)}
+      {tab === 'specs' && drawSpecs(ui, input, run)}
+      {tab === 'tests' && drawTests(ui, input)}
+      {tab === 'prs' && drawPullRequest(ui, input)}
       {v.runId !== null && v.runId !== s.branchRuns[0]?.runId && (
         <Box>
           <Button key="back" plain dimColor label={`← Back to ${branch ?? 'this branch'}`} onPress={() => actions.select(null)} />
@@ -566,11 +622,14 @@ const drawRunView = (ui: Ui, input: PaneInput): RenderElement => {
 const drawRunCard = (ui: Ui, input: PaneInput, run: Run): RenderElement => {
   const { Box, Text, Button, Link } = ui
   const Svg = 'Svg' in ui ? ui.Svg : null
-  const { now, width, actions } = input
+  const { s, all, now, width, actions } = input
   const verdict = verdictOf(run)
   const meta = VERDICT[verdict]
   const failed = failedCount(run.tests)
   const rate = passRate(run.tests)
+  const detail = all[run.runId]
+  const baseline = baselineOf(s, run, all)
+  const fresh = detail === undefined || baseline === null ? null : newFailures(detail, baseline.detail)
 
   const facts = [
     run.framework ? `🎭 ${run.framework}` : null,
@@ -602,6 +661,8 @@ const drawRunCard = (ui: Ui, input: PaneInput, run: Run): RenderElement => {
         ))}
       </Text>
     )
+  const newCount = fresh?.length ?? 0
+  const listed = realFailures(detail).length
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={meta.color} paddingX={1} rowGap={0}>
@@ -633,10 +694,18 @@ const drawRunCard = (ui: Ui, input: PaneInput, run: Run): RenderElement => {
         {run.tests.flaky > 0 && <Text color={COUNTER.flaky.color}>{`${COUNTER.flaky.glyph} ${run.tests.flaky} flaky`}</Text>}
       </Box>
       <Box marginTop={1}>{bar}</Box>
+      {fresh !== null && listed > 0 && (
+        <Text color={newCount > 0 ? 'error' : 'inactive'}>
+          {newCount > 0
+            ? `${plural(newCount, 'failure')} new on ${run.branch ?? 'this branch'}, not failing on ${baseline?.name ?? 'the default branch'}`
+            : `Every failure also fails on ${baseline?.name ?? 'the default branch'}`}
+        </Text>
+      )}
       <Box marginTop={1} columnGap={2} flexWrap="wrap" alignItems="center">
         {(failed > 0 || run.tests.flaky > 0) && (
           <Button key="fix" variant="primary" label={failed > 0 ? `Fix ${plural(failed, 'failure')} with Claude` : 'Fix flaky tests with Claude'} onPress={() => actions.fix(run)} />
         )}
+        <Button key="share" label="Share link" onPress={() => actions.share(run)} />
         <Link href={runUrl(run.runId)} label="Open in Currents" />
         {failed > 0 && <Link href={failedTestsUrl(run.runId)} label="Failed tests" />}
         {run.prLink !== null && run.prNumber !== null && <Link href={run.prLink} label={`PR #${run.prNumber}`} />}
@@ -648,8 +717,10 @@ const drawRunCard = (ui: Ui, input: PaneInput, run: Run): RenderElement => {
 const drawSummary = (ui: Ui, input: PaneInput, run: Run): RenderElement => {
   const { Box, Text, Button } = ui
   const Svg = 'Svg' in ui ? ui.Svg : null
-  const { s, detail, now, width, actions } = input
+  const { s, detail, all, now, width, actions } = input
   const history = s.scope === 'mine' || (run.branch !== null && run.branch === s.repo?.branch) ? s.branchRuns : []
+  const baseline = baselineOf(s, run, all)
+  const fresh = detail === undefined || baseline === null ? null : newFailures(detail, baseline.detail)
 
   return (
     <Box flexDirection="column" rowGap={1}>
@@ -668,7 +739,7 @@ const drawSummary = (ui: Ui, input: PaneInput, run: Run): RenderElement => {
       {detail !== undefined && detail.failed.length > 0 && (
         <Box flexDirection="column">
           <Text bold>{`Failures${detail.failedTotal + detail.flakyTotal > 3 ? ` (top 3 of ${detail.failedTotal + detail.flakyTotal})` : ''}`}</Text>
-          {detail.failed.slice(0, 3).map(test => drawFailedTest(ui, input, run, test, true))}
+          {detail.failed.slice(0, 3).map(test => drawFailedTest(ui, input, run, test, true, tagOf(test, fresh)))}
           <Box>
             <Button key="all-errors" plain dimColor label="See all errors →" onPress={() => actions.tab('errors')} />
           </Box>
@@ -713,8 +784,15 @@ const drawSummary = (ui: Ui, input: PaneInput, run: Run): RenderElement => {
   )
 }
 
-const drawFailedTest = (ui: Ui, input: PaneInput, run: Run, test: FailedTest, isCompact: boolean): RenderElement => {
-  const { Box, Text, Link } = ui
+const drawFailedTest = (
+  ui: Ui,
+  input: PaneInput,
+  run: Run,
+  test: FailedTest,
+  isCompact: boolean,
+  tag: 'new' | 'main' | null,
+): RenderElement => {
+  const { Box, Text, Link, Button } = ui
   const info = test.isFlaky ? COUNTER.flaky : COUNTER.failed
   const path = [test.spec, ...test.title].filter(Boolean).join(' › ')
   const width = Math.max(20, input.width - 6)
@@ -728,6 +806,12 @@ const drawFailedTest = (ui: Ui, input: PaneInput, run: Run, test: FailedTest, is
             {' Flaky '}
           </Text>
         )}
+        {tag === 'new' && (
+          <Text color="error" bold>
+            new
+          </Text>
+        )}
+        {tag === 'main' && <Text dimColor>on main too</Text>}
         <Text wrap="truncate-middle">{clip(path, width)}</Text>
       </Box>
       {lines.map(line => (
@@ -738,6 +822,9 @@ const drawFailedTest = (ui: Ui, input: PaneInput, run: Run, test: FailedTest, is
           {test.location !== null && <Text dimColor>{test.location}</Text>}
           {test.durationMs !== null && <Text dimColor>{duration(test.durationMs)}</Text>}
           <Link href={testUrl(run.runId, test)} label="Open test" />
+          {test.instanceId !== null && (
+            <Button key={`share-${test.key}`} plain dimColor label="Share link" onPress={() => input.actions.shareTest(test)} />
+          )}
         </Box>
       )}
     </Box>
@@ -746,7 +833,7 @@ const drawFailedTest = (ui: Ui, input: PaneInput, run: Run, test: FailedTest, is
 
 const drawErrors = (ui: Ui, input: PaneInput, run: Run): RenderElement => {
   const { Box, Text, Link, Button } = ui
-  const { detail, actions } = input
+  const { s, detail, all, actions } = input
   if (detail === undefined) {
     return <Text dimColor>{failedCount(run.tests) + run.tests.flaky > 0 ? 'Loading failures…' : 'No failed or flaky tests.'}</Text>
   }
@@ -757,6 +844,8 @@ const drawErrors = (ui: Ui, input: PaneInput, run: Run): RenderElement => {
       </Text>
     )
   }
+  const baseline = baselineOf(s, run, all)
+  const fresh = baseline === null ? null : newFailures(detail, baseline.detail)
   const shown = detail.failed.length
   const total = detail.failedTotal + detail.flakyTotal
   return (
@@ -766,7 +855,7 @@ const drawErrors = (ui: Ui, input: PaneInput, run: Run): RenderElement => {
         {detail.flakyTotal > 0 && <Text color={COUNTER.flaky.color}>{` · ${detail.flakyTotal} flaky`}</Text>}
         <Text dimColor>{shown < total ? ` · showing ${shown}` : ''}</Text>
       </Text>
-      {detail.failed.map(test => drawFailedTest(ui, input, run, test, false))}
+      {detail.failed.map(test => drawFailedTest(ui, input, run, test, false, tagOf(test, fresh)))}
       <Box marginTop={1} columnGap={2}>
         {detail.failedTotal > 0 && (
           <Button key="fix-errors" variant="primary" label="Fix with Claude" onPress={() => actions.fix(run)} />
@@ -821,58 +910,179 @@ const drawSpecs = (ui: Ui, input: PaneInput, run: Run): RenderElement => {
   )
 }
 
-const drawPullRequests = (ui: Ui, input: PaneInput): RenderElement => {
+const REVIEW: Record<string, { label: string; color: string }> = {
+  APPROVED: { label: 'Approved', color: 'success' },
+  CHANGES_REQUESTED: { label: 'Changes requested', color: 'error' },
+  REVIEW_REQUIRED: { label: 'Review required', color: 'warning' },
+}
+
+/** The runs by commit, in the order the newest of each commit came: a commit's builds keep their order. */
+const byCommit = (runs: Run[]) => {
+  const groups = new Map<string, { sha: string | null; author: string | null; runs: Run[] }>()
+  for (const run of runs) {
+    const key = run.sha ?? run.runId
+    const group = groups.get(key) ?? { sha: run.sha, author: run.author, runs: [] }
+    group.runs.push(run)
+    groups.set(key, group)
+  }
+  return [...groups.values()]
+}
+
+/** The branch's pull request, with its builds in order by commit, as the IDE's PR view draws them. */
+const drawPullRequest = (ui: Ui, input: PaneInput): RenderElement => {
   const { Box, Text, Button, Link } = ui
   const Svg = 'Svg' in ui ? ui.Svg : null
   const { s, v, now, width, actions } = input
-  if (s.prs.length === 0 && s.quietPrs.length === 0) {
-    return <Text dimColor>No open pull requests of yours have Currents runs.</Text>
-  }
+  const branch = s.repo?.branch ?? null
+  const pr = pullRequestOf(s)
+  const runs = s.scope === 'branch' ? s.branchRuns : []
   const shown = shownRun(s, v)?.runId ?? null
+
+  if (pr === null && runs.length === 0) {
+    return (
+      <Box flexDirection="column" rowGap={1}>
+        <Text dimColor>{branch === null ? 'No branch to show a pull request for.' : `No pull request for ${branch} yet, and no runs on it.`}</Text>
+        {s.repo?.slug && branch !== null && (
+          <Link href={`https://github.com/${s.repo.slug}/compare/${branch}?expand=1`} label="Open a pull request on GitHub ↗" />
+        )}
+      </Box>
+    )
+  }
+
+  const review = pr?.review ? REVIEW[pr.review] : undefined
   return (
     <Box flexDirection="column" rowGap={1}>
-      {s.prs.map(pr => {
-        const run = pr.latest
-        const meta = VERDICT[verdictOf(run)]
-        const title = pr.title ?? run.title
-        const tail = `${outcomeSummary(run)} · ${isActive(run) ? duration(elapsed(run, now)) : ago(run.createdAt, now)}`
-        const failedRuns = pr.recent.filter(r => r.status === 'FAILED').length
-        return (
-          <Box key={`prbox-${pr.id}`} flexDirection="column">
-            <Button key={`pr-${pr.id}`} plain dimColor={run.runId !== shown} onPress={() => actions.select(run.runId)}>
-              <Text color={meta.color}>{`${meta.glyph} `}</Text>
-              <Text bold>{pr.number ? `#${pr.number} ` : ''}</Text>
-              {clip(title, Math.max(16, width - tail.length - 10))}
-              <Text color={meta.color}>{`  ${tail}`}</Text>
-            </Button>
-            <Box columnGap={1} marginLeft={2}>
-              <Text dimColor>{`${pr.source ?? run.branch ?? '?'} → ${pr.destination ?? '?'}`}</Text>
-              {pr.recent.length > 1 &&
-                (Svg !== null ? (
-                  <Svg source={runDots(pr.recent, 9, 3)} alt={`Last ${pr.recent.length} runs`} isInteractive />
-                ) : (
-                  <Text>
-                    {pr.recent
-                      .slice(0, 10)
-                      .reverse()
-                      .map(item => (
-                        <Text color={VERDICT[verdictOf(item)].color}>{VERDICT[verdictOf(item)].glyph}</Text>
-                      ))}
-                  </Text>
-                ))}
-              {pr.recent.length > 1 && (
-                <Text dimColor>{`last ${pr.recent.length}: ${pr.recent.length - failedRuns} passed, ${failedRuns} failed`}</Text>
-              )}
+      {pr !== null && (
+        <Box flexDirection="column">
+          <Text>
+            <Text bold>{`#${pr.number} `}</Text>
+            {clip(pr.title ?? `Pull request #${pr.number}`, Math.max(16, width - 10))}
+          </Text>
+          <Text dimColor>
+            {[pr.isDraft ? 'Draft' : 'Open', `${branch ?? '?'} → ${pr.base ?? '?'}`].join(' · ')}
+            {review !== undefined && <Text color={review.color}>{` · ${review.label}`}</Text>}
+          </Text>
+          {pr.url !== null && (
+            <Box marginTop={1}>
+              <Link href={pr.url} label="Open the pull request ↗" />
             </Box>
-          </Box>
-        )
-      })}
-      {s.quietPrs.map(pr => (
-        <Text key={`quiet-${pr.number}`} dimColor>
-          {`○ #${pr.number} ${clip(pr.title, Math.max(16, width - 30))} · no Currents runs yet${pr.isDraft ? ' · draft' : ''}`}
+          )}
+        </Box>
+      )}
+      {runs.length === 0 ? (
+        <Text dimColor>No Currents runs for this pull request yet.</Text>
+      ) : (
+        <Box flexDirection="column" rowGap={1}>
+          {runs.length > 1 &&
+            (Svg !== null ? (
+              <Svg source={runDots(runs, 9, 3)} alt={`Last ${Math.min(runs.length, 10)} builds, oldest first`} isInteractive />
+            ) : (
+              <Text>
+                {runs
+                  .slice(0, 10)
+                  .reverse()
+                  .map(run => (
+                    <Text color={VERDICT[verdictOf(run)].color}>{VERDICT[verdictOf(run)].glyph}</Text>
+                  ))}
+              </Text>
+            ))}
+          <Text bold>Builds, by commit</Text>
+          {byCommit(runs)
+            .slice(0, 8)
+            .map(group => (
+              <Box key={`commit-${group.sha ?? group.runs[0]?.runId ?? ''}`} flexDirection="column">
+                <Text dimColor>
+                  {`${shortSha(group.sha) ?? 'no commit'}${group.author ? ` · ${group.author}` : ''} · ${ago(group.runs[0]?.createdAt ?? now, now)}`}
+                </Text>
+                {group.runs.slice(0, 4).map(run => {
+                  const meta = VERDICT[verdictOf(run)]
+                  const failed = failedCount(run.tests)
+                  return (
+                    <Button key={`build-${run.runId}`} plain dimColor={run.runId !== shown} onPress={() => actions.select(run.runId)}>
+                      <Text color={meta.color}>{`${meta.glyph} `}</Text>
+                      {`${meta.label}${failed > 0 ? ` · ${failed} failed` : ''}${run.tests.flaky > 0 ? ` · ${run.tests.flaky} flaky` : ''} · ${duration(elapsed(run, now))}${run.ciBuildId ? ` · CI ${clip(run.ciBuildId, 16)}` : ''}`}
+                    </Button>
+                  )
+                })}
+              </Box>
+            ))}
+        </Box>
+      )}
+      {s.project !== null && branch !== null && <Link href={branchRunsUrl(s.project.projectId, branch)} label="All runs of this branch in Currents" />}
+    </Box>
+  )
+}
+
+/** The tests of the branch, flakiest or slowest over the last month, read when the tab is chosen. */
+const drawTests = (ui: Ui, input: PaneInput): RenderElement => {
+  const { Box, Text, Button, Link } = ui
+  const { s, v, actions } = input
+  const branch = s.repo?.branch ?? null
+  const sort: TestSort = v.testSort ?? 'flakiness'
+  if (branch === null || s.project === null) {
+    return <Text dimColor>Tests are kept per branch: run this in a git repository, on a branch.</Text>
+  }
+  const current = s.branchTests !== null && s.branchTests.branch === branch && s.branchTests.sort === sort ? s.branchTests : null
+  const options: { id: TestSort; label: string }[] = [
+    { id: 'flakiness', label: 'Flakiest' },
+    { id: 'duration', label: 'Slowest' },
+  ]
+  return (
+    <Box flexDirection="column" rowGap={1}>
+      <Box columnGap={1} flexWrap="wrap">
+        <Text dimColor>{`${branch}, the last ${TEST_WINDOW_DAYS} days ·`}</Text>
+        {options.map(option => (
+          <Button
+            key={`sort-${option.id}`}
+            {...(sort === option.id ? { variant: 'primary' as const } : { dimColor: true })}
+            label={option.label}
+            onPress={() => actions.testSort(option.id)}
+          />
+        ))}
+      </Box>
+      {current === null ? (
+        <Text dimColor>Loading the branch's tests…</Text>
+      ) : current.error !== null ? (
+        <Text color="warning">{`Could not load the tests: ${current.error}`}</Text>
+      ) : current.list.length === 0 ? (
+        <Text dimColor>
+          {sort === 'flakiness'
+            ? `No test on ${branch} flaked in the last ${TEST_WINDOW_DAYS} days.`
+            : `No test on ${branch} has run twice in the last ${TEST_WINDOW_DAYS} days.`}
         </Text>
-      ))}
-      {s.project !== null && <Link href={pullRequestsUrl(s.project.projectId)} label="All pull requests in Currents" />}
+      ) : (
+        <Box flexDirection="column" rowGap={1}>
+          {current.list.slice(0, 12).map(test => drawTestStat(ui, test, sort))}
+          <Box columnGap={2} flexWrap="wrap">
+            <Button
+              key="fix-tests"
+              variant="primary"
+              label={sort === 'flakiness' ? 'Fix flaky tests with Claude' : 'Speed up the slow tests with Claude'}
+              onPress={actions.fixTests}
+            />
+            <Link href={branchRunsUrl(s.project.projectId, branch)} label="This branch in Currents" />
+          </Box>
+        </Box>
+      )}
+    </Box>
+  )
+}
+
+const drawTestStat = (ui: Ui, test: TestStat, sort: TestSort): RenderElement => {
+  const { Box, Text } = ui
+  const figure =
+    sort === 'flakiness'
+      ? `${(test.flakinessRate * 100).toFixed(1)}% flaky`
+      : `avg ${duration(test.avgDurationMs)}`
+  return (
+    <Box key={`test-${test.spec}-${test.title}`} flexDirection="column">
+      <Box columnGap={1}>
+        <Text color={sort === 'flakiness' ? COUNTER.flaky.color : 'warning'}>{sort === 'flakiness' ? COUNTER.flaky.glyph : '◷'}</Text>
+        <Box flexGrow={1} flexShrink={1}>
+          <Text wrap="truncate-end">{test.title}</Text>
+        </Box>
+      </Box>
+      <Text dimColor wrap="truncate-start">{`  ${test.spec} · ${figure} · ${plural(test.executions, 'run')}`}</Text>
     </Box>
   )
 }
@@ -881,7 +1091,7 @@ const drawFooter = (ui: Ui, input: PaneInput): RenderElement => {
   const { Box, Text, Button } = ui
   const { s, now, isBandHidden, actions } = input
   const c = s.connection
-  const active = [s.branchRuns[0], ...s.prs.map(pr => pr.latest)].some(run => run !== undefined && isActive(run))
+  const active = s.branchRuns[0] !== undefined && isActive(s.branchRuns[0])
   const parts = [
     s.updatedAt !== null ? `Updated ${ago(s.updatedAt, now)}` : null,
     // Failing, it retries less and less often.

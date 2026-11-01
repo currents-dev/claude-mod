@@ -5,10 +5,15 @@ export const SERVER_KEY = 'currents'
 
 import type { EngineInterface } from 'claude-code'
 
-import type { Connection, Project, PullRequest, Run, RunDetail } from '../types'
-import { failedCount, listOf, toDetail, toPullRequest, toRun } from './model'
+import type { Connection, Project, Run, RunDetail, TestSort, TestStat } from '../types'
+import { failedCount, listOf, toDetail, toRun, toTestStats } from './model'
 
 type Engine = EngineInterface
+
+const DAY = 24 * 60 * 60 * 1000
+
+/** How far back the Tests tab looks: the branch's last month of runs. */
+export const TEST_WINDOW_DAYS = 30
 
 /** A tool every Currents MCP server has with `results:read`, which identifies one. */
 const SIGNATURE = '__currents-get-runs'
@@ -22,9 +27,9 @@ export type FailureKind = 'auth' | 'scope' | 'rate' | 'network' | 'disconnected'
 export const READS = [
   'currents-get-projects',
   'currents-get-runs',
-  'currents-list-pull-requests',
   'currents-get-run-details',
   'currents-get-context',
+  'currents-get-tests-performance',
 ] as const
 
 /** A server's name as tool names spell it: `plugin:currents-ci:currents` → `plugin_currents-ci_currents`. */
@@ -215,25 +220,47 @@ export async function fetchRuns(
     .filter(run => run.runId !== '')
 }
 
-export type PrFilter = { branches?: string[]; authors?: string[] }
-
-export async function fetchPullRequests(
+/**
+ * The branch's tests, the Test Explorer's rows for it over the last month: the
+ * flakiest or the slowest, of those with a few executions.
+ */
+export async function fetchTestStats(
   $: Engine,
   server: string,
   projectId: string,
-  filter: PrFilter,
-): Promise<PullRequest[]> {
-  const body = await callTool($, server, 'currents-list-pull-requests', {
+  branch: string,
+  sort: TestSort,
+  now: number,
+): Promise<TestStat[]> {
+  const body = await callTool($, server, 'currents-get-tests-performance', {
     projectId,
-    limit: 25,
-    // The mod reads each card's latestRun and recentRuns; the timeline preview
-    // would repeat the latest run, groups and all, and double the reply.
-    runs_per_pr: 0,
-    ...filter,
+    branches: [branch],
+    date_start: new Date(now - TEST_WINDOW_DAYS * DAY).toISOString().slice(0, 10),
+    date_end: new Date(now).toISOString().slice(0, 10),
+    order: sort === 'flakiness' ? 'flakiness' : 'duration',
+    dir: 'desc',
+    min_executions: 2,
+    limit: 15,
   })
-  return listOf(body)
-    .map(toPullRequest)
-    .filter(pr => pr.id !== '' && pr.latest.runId !== '')
+  return toTestStats(body)
+}
+
+/**
+ * A public link to a run's or a single test's report, for a person: made only
+ * when the person presses Share. Its `pageUrl` opens in a browser.
+ */
+export async function createShareLink(
+  $: Engine,
+  server: string,
+  target: { run_id: string } | { instance_id: string; test_id: string },
+): Promise<string> {
+  const body = (await callTool($, server, 'currents-create-share-link', { purpose: 'report', ...target })) as {
+    pageUrl?: unknown
+    data?: { pageUrl?: unknown }
+  } | null
+  const link = body?.pageUrl ?? body?.data?.pageUrl
+  if (typeof link !== 'string' || link === '') throw new CurrentsError('Currents did not return a link to share.', 'api')
+  return link
 }
 
 /** A project's newest run, any state, among those the filter keeps. */
@@ -255,7 +282,8 @@ export async function fetchDetail($: Engine, server: string, run: Run): Promise<
         run_id: run.runId,
         format: 'json',
         detail: 'compact',
-        limit: 15,
+        // Every failure of the run, so the band can tell which are new on the branch.
+        limit: 50,
         include_flaky: true,
       }).catch(() => null)
     : null

@@ -1,8 +1,8 @@
 {
   "name": "currents-ci",
   "displayName": "Currents",
-  "version": "1.0.0",
-  "description": "Currents test runs in Claude Code: a live status band for your branch and PRs, and a drawer with the run's results, errors and spec files.",
+  "version": "1.1.0",
+  "description": "Currents test runs in Claude Code: a status band for your branch and its pull request, and a drawer with its runs, failures, flaky tests and builds.",
   "author": {
     "name": "Currents",
     "url": "https://currents.dev"
@@ -31,16 +31,6 @@
       "title": "Notify when a run finishes",
       "description": "Raise a notification when a run on your branch or one of your pull requests finishes.",
       "default": true
-    },
-    "pullRequests": {
-      "type": "string",
-      "title": "Pull requests to show",
-      "description": "mine: your open pull requests (from the GitHub CLI, else your git author name). all: the project's latest pull requests.",
-      "options": [
-        "mine",
-        "all"
-      ],
-      "default": "mine"
     }
   }
 }

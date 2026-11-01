@@ -1,8 +1,8 @@
-// The working copy: its branch, the person's open pull requests, and which Currents project it records to.
+// The working copy: its branch, the branch's pull request, and which Currents project it records to.
 
 import type { EngineInterface } from 'claude-code'
 
-import type { Project, Repo, Run } from '../types'
+import type { BranchPr, Project, Repo, Run } from '../types'
 
 type Engine = EngineInterface
 
@@ -34,20 +34,30 @@ export async function readRepo($: Engine, cwd: string): Promise<Repo | null> {
   return { root, branch: branch || null, sha: sha || null, slug: slugOf(remote) }
 }
 
-export type OpenPr = { number: string; branch: string; title: string; isDraft: boolean }
-
-/** The person's open pull requests in this repository, from the GitHub CLI; null without one. */
-export async function myOpenPrs($: Engine, root: string): Promise<OpenPr[] | null> {
-  const out = await run(
-    $,
-    ['gh', 'pr', 'list', '--author', '@me', '--state', 'open', '--limit', '30', '--json', 'number,headRefName,title,isDraft'],
-    root,
-    20_000,
-  )
+/**
+ * The pull request of the checked-out branch, from the GitHub CLI: null when the
+ * branch has none, or there is no GitHub CLI.
+ */
+export async function prOfBranch($: Engine, root: string): Promise<BranchPr | null> {
+  const out = await run($, ['gh', 'pr', 'view', '--json', 'number,title,url,isDraft,reviewDecision,baseRefName'], root, 20_000)
   if (out === null) return null
   try {
-    const list = JSON.parse(out) as { number: number; headRefName: string; title: string; isDraft: boolean }[]
-    return list.map(pr => ({ number: String(pr.number), branch: pr.headRefName, title: pr.title, isDraft: pr.isDraft }))
+    const pr = JSON.parse(out) as {
+      number: number
+      title: string
+      url: string
+      isDraft: boolean
+      reviewDecision: string | null
+      baseRefName: string | null
+    }
+    return {
+      number: String(pr.number),
+      title: pr.title,
+      url: pr.url,
+      isDraft: pr.isDraft,
+      review: pr.reviewDecision || null,
+      base: pr.baseRefName || null,
+    }
   } catch {
     return null
   }

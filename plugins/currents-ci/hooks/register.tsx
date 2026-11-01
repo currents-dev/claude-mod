@@ -1,24 +1,27 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderSurface } from 'claude-code'
-import type { Tab, View } from '../types'
+import type { FailedTest, Tab, TestSort, View } from '../types'
 
 import {
+  ensureBranchTests,
   ensureDetail,
   ensureLoop,
+  fixTestsWithClaude,
   fixWithClaude,
-  openSignIn,
   markPushed,
+  openSignIn,
   pickProject,
   refresh,
   retry,
   schedule,
+  shareReport,
   shownRun,
   type Options,
 } from './controller'
 import { lastScan, noteTool } from './currents'
 import { duration, outcomeSummary, VERDICT, verdictOf } from './model'
 import { EMPTY, FIRST_VIEW, NO_DETAILS, PANE, normalize } from './state'
-import { CLAUDE_DIRECTORY, drawBand, drawPane, type Actions } from './views'
+import { CLAUDE_DIRECTORY, drawBand, drawPane, pullRequestOf, type Actions } from './views'
 
 const snapshot = atom({ plugin: 'currents-ci', key: 'snapshot' } as const, EMPTY)
 const details = atom({ plugin: 'currents-ci', key: 'details' } as const, NO_DETAILS)
@@ -66,6 +69,12 @@ async function selectRun($: Engine, runId: string | null) {
 async function selectTab($: Engine, tab: Tab) {
   const v = await update($, view, (current): View => ({ ...current, tab }))
   await ensureDetail($, shownRun(normalize(await read($, snapshot)), v))
+  if (tab === 'tests') await ensureBranchTests($, v.testSort ?? 'flakiness')
+}
+
+async function selectSort($: Engine, testSort: TestSort) {
+  await update($, view, (current): View => ({ ...current, testSort }))
+  await ensureBranchTests($, testSort)
 }
 
 /** One line for a command's reply. */
@@ -99,8 +108,16 @@ function actionsFor($: Engine, settings: Options): Actions {
     hideBand: () => void quietly(dismissBand($)),
     showBand: () => void quietly(setBandHidden($, false, true)),
     fix: run => void quietly(fixWithClaude($, run)),
+    fixTests: () => void quietly(fixTestsWithClaude($)),
+    share: run => void quietly(shareReport($, { run_id: run.runId }, 'this run')),
+    shareTest: (test: FailedTest) => {
+      if (test.instanceId === null) return
+      const what = `the failing test ${[test.spec, ...test.title].filter(Boolean).join(' › ')}`
+      void quietly(shareReport($, { instance_id: test.instanceId, test_id: test.testId }, what))
+    },
     select: runId => void quietly(selectRun($, runId)),
     tab: tab => void quietly(selectTab($, tab)),
+    testSort: sort => void quietly(selectSort($, sort)),
     pick: project => void quietly(pickProject($, settings, project)),
     picking: isPicking => void quietly(update($, view, (v): View => ({ ...v, isPicking }))),
     copy: (text, surface) => void quietly(copyRules($, text, surface)),
@@ -117,16 +134,13 @@ async function copyRules($: Engine, text: string, surface: RenderSurface) {
 }
 
 export const register: Register = (on, options) => {
-  const settings: Options = {
-    notifications: options.notifications !== false,
-    pullRequests: options.pullRequests === 'all' ? 'all' : 'mine',
-  }
+  const settings: Options = { notifications: options.notifications !== false }
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'currents',
-      description: 'Currents test runs for this branch and your PRs',
-      argumentHint: '[refresh | connect | project | band | status]',
+      description: "Currents test runs for this branch and its pull request",
+      argumentHint: '[refresh | connect | project | band | share | status]',
       immediate: true,
     })
     const hidden = await $.store.get('bandHidden')
@@ -157,16 +171,27 @@ export const register: Register = (on, options) => {
       }
     }
     if (arg === 'status') {
-      const s = await read($, snapshot)
+      const s = normalize(await read($, snapshot))
+      const pr = pullRequestOf(s)
       const lines = [
         await statusLine($),
         `Connection: ${s.connection.state === 'connected' ? `via ${s.connection.server}` : s.connection.state}`,
         `MCP tools seen: ${lastScan.mcpTools} from ${lastScan.servers.length} servers${lastScan.servers.length > 0 ? ` (${lastScan.servers.join(', ')})` : ''}`,
         `Project: ${s.project ? `${s.project.name} (${s.project.projectId}), ${s.projectSource}` : 'none'}`,
         `Repository: ${s.repo ? `${s.repo.slug ?? s.repo.root} on ${s.repo.branch ?? 'detached HEAD'}` : 'none'}`,
+        `Pull request: ${pr ? `#${pr.number} ${pr.title ?? ''}${pr.isDraft ? ' (draft)' : ''}` : 'none found (the GitHub CLI reads the branch\'s pull request)'}`,
         s.error ? `Last error: ${s.error}` : null,
       ]
       return { text: lines.filter(Boolean).join('\n') }
+    }
+    if (arg === 'share') {
+      const s = normalize(await read($, snapshot))
+      const run = s.branchRuns[0] ?? s.baseRun
+      if (run === null) return { text: 'No Currents run to share yet.' }
+      const link = await shareReport($, { run_id: run.runId }, 'this run')
+      return {
+        text: link === null ? 'The link could not be made: see the message above.' : `Link to this run (anyone with it can open it until it expires): ${link}`,
+      }
     }
     if (arg === 'project') {
       await openPane($, true)
@@ -193,6 +218,7 @@ export const register: Register = (on, options) => {
     return drawPane($.ui.resolve(e), {
       s,
       v,
+      all,
       detail: run === null ? undefined : all[run.runId],
       now: await $.clock.now(),
       width: e.props.bodyColumns,
@@ -207,11 +233,12 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || (await read($, bandHidden))) return next(e)
     const s = normalize(await read($, snapshot))
+    const all = await read($, details)
     const now = await $.clock.now()
     const { Box, Text } = $.ui.resolve(e)
     let tree
     try {
-      tree = drawBand($.ui.resolve(e), s, now, e.props.bodyColumns, actionsFor($, settings))
+      tree = drawBand($.ui.resolve(e), s, all, now, e.props.bodyColumns, actionsFor($, settings))
     } catch (error) {
       // A band that fails to draw says so rather than vanishing.
       tree = <Text color="warning">{`Currents: the band could not draw (${error instanceof Error ? error.message : String(error)})`}</Text>

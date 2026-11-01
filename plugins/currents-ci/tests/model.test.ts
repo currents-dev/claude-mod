@@ -7,17 +7,45 @@ import {
   failedCount,
   fixPrompt,
   listOf,
+  newFailures,
   outcomeSummary,
   passRate,
   progressOf,
+  testKeyOf,
+  testsPrompt,
   toDetail,
-  toPullRequest,
   toRun,
+  toTestStats,
   verdictOf,
 } from '../hooks/model'
 import { mostRecent, slugOf } from '../hooks/repo'
 import { fit } from '../hooks/views'
-import { NOW, context, failedRun, iso, pullRequests, runDetails, runningRun } from './fixtures'
+import type { FailedTest, RunDetail } from '../types'
+import {
+  NOW,
+  context,
+  failedRun,
+  flakiestTests,
+  flakyContext,
+  iso,
+  rerunRun,
+  runDetails,
+  runningRun,
+  slowestTests,
+} from './fixtures'
+
+/** A failing test of the branch's login spec, as the run's details list it. */
+const failedTest = (title: string[]): FailedTest => ({
+  key: `${title.join('-')}:i-1`,
+  testId: title.join('-'),
+  instanceId: 'i-1',
+  spec: 'tests/login.spec.ts',
+  title,
+  isFlaky: false,
+  error: 'Error: expect(page).toHaveURL(expected)',
+  location: null,
+  durationMs: null,
+})
 
 describe('runs', () => {
   test('sums the groups and titles the run as the dashboard does', async () => {
@@ -59,15 +87,7 @@ describe('runs', () => {
   })
 })
 
-describe('pull requests and details', () => {
-  test('reads a pull request card', async () => {
-    const [card] = listOf(pullRequests).map(toPullRequest)
-    expect(card?.number).toBe('42')
-    expect(card?.source).toBe('fix-login')
-    expect(card?.latest.runId).toBe('run-failed-1')
-    expect(card?.recent[0]?.failures).toBe(3)
-  })
-
+describe('details and prompts', () => {
   test('orders spec files failures first and keeps the first lines of each error', async () => {
     const detail = toDetail(runDetails, context)
     expect(detail.specs.map(spec => spec.state)).toEqual(['failed', 'flaky', 'passed'])
@@ -80,14 +100,90 @@ describe('pull requests and details', () => {
     expect(detail.isFinal).toBe(true)
   })
 
+  test('reads the tests the Tests tab lists, with their flakiness and duration', async () => {
+    const [flaky] = toTestStats(flakiestTests)
+    expect(flaky).toEqual({
+      title: 'saves the avatar',
+      spec: 'tests/profile.spec.ts',
+      executions: 8,
+      failures: 1,
+      flaky: 1,
+      flakinessRate: 0.125,
+      avgDurationMs: 1_800,
+      lastSeen: iso(11),
+    })
+    expect(toTestStats({ status: 'OK' })).toEqual([])
+  })
+
   test('drafts a fix prompt that names the run and its failures', async () => {
     const run = toRun(failedRun)
-    const prompt = fixPrompt(run, toDetail(runDetails, context))
+    const detail = toDetail(runDetails, context)
+    const prompt = fixPrompt(run, detail, newFailures(detail, toDetail(runDetails, null)), 'main')
     expect(prompt).toContain('branch `fix-login` failed: 3 failed tests, 2 flaky')
     expect(prompt).toContain('https://app.currents.dev/run/run-failed-1')
     expect(prompt).toContain('tests/login.spec.ts › Login › redirects to the dashboard after sign in')
     expect(prompt).toContain('at tests/login.spec.ts:41')
-    expect(prompt).not.toContain('saves the avatar')
+    expect(prompt).toContain('None of the failing tests fail on main: all are new on this branch.')
+    // The flaky test is named in its own section, not among the failures.
+    expect(prompt).toContain('Flaky tests (they passed on a retry):\n1. tests/profile.spec.ts › Profile › saves the avatar')
+    expect(prompt.split('Flaky tests')[0]).not.toContain('saves the avatar')
+  })
+
+  test('a fix prompt says how many of the failing tests are new on the branch', async () => {
+    const run = toRun(failedRun)
+    const login = failedTest(['Login', 'redirects to the dashboard after sign in'])
+    const logout = failedTest(['Login', 'logs out'])
+    const branch: RunDetail = { ...toDetail(runDetails, null), failed: [login, logout], failedTotal: 2 }
+    const onMain = (failed: FailedTest[]): RunDetail => ({ ...toDetail(runDetails, null), failed, failedTotal: failed.length })
+    const draft = (main: RunDetail) => fixPrompt(run, branch, newFailures(branch, main), 'main')
+    expect(draft(onMain([]))).toContain('None of the failing tests fail on main: all are new on this branch.')
+    expect(draft(onMain([login, logout]))).toContain('Every failing test also fails on main.')
+    expect(draft(onMain([login]))).toContain('1 of the 2 failing tests are new on this branch; the others also fail on main.')
+  })
+
+  test('a fix prompt for a run whose only problems are flaky tests still names them', async () => {
+    const prompt = fixPrompt(toRun(rerunRun), toDetail(runDetails, flakyContext), null, null)
+    expect(prompt).toContain('2 flaky')
+    expect(prompt).toContain('Flaky tests (they passed on a retry):\n1. tests/profile.spec.ts › Profile › saves the avatar')
+    expect(prompt).not.toContain('Failed tests:')
+  })
+
+  test('a passed run with only flaky tests is drafted as passed, not failed', async () => {
+    const prompt = fixPrompt(toRun(rerunRun), toDetail(runDetails, flakyContext), null, null)
+    expect(prompt).toContain('branch `fix-login` passed: no failed tests, 2 flaky')
+    expect(prompt).not.toContain('failed: no failed tests')
+  })
+
+  test('the tests prompt lists each test with its flakiness, or its duration for the slowest', async () => {
+    const flaky = testsPrompt('fix-login', toTestStats(flakiestTests), 'flakiness', 30)
+    expect(flaky).toContain('These tests on branch `fix-login` were flaky in the last 30 days:')
+    expect(flaky).toContain('1. tests/profile.spec.ts › saves the avatar (12.5% flaky over 8 executions)')
+    const slow = testsPrompt('fix-login', toTestStats(slowestTests), 'duration', 30)
+    expect(slow).toContain('1. tests/checkout.spec.ts › exports every order as CSV (avg 1m 35s over 6 executions)')
+  })
+})
+
+describe('new failures', () => {
+  test('a failure is new unless the default branch fails the same spec and title, whatever the id', async () => {
+    const detail = toDetail(runDetails, context)
+    const onMain = { ...toDetail(runDetails, null), failed: detail.failed.map(test => ({ ...test, testId: 't-90' })) }
+    expect(newFailures(detail, toDetail(runDetails, null))?.map(test => test.title)).toEqual([
+      ['Login', 'redirects to the dashboard after sign in'],
+    ])
+    expect(newFailures(detail, onMain)).toEqual([])
+  })
+
+  test("a failure counts as new only once the default branch's run is read", async () => {
+    const detail = toDetail(runDetails, context)
+    expect(newFailures(detail, undefined)).toBeNull()
+    expect(newFailures(detail, { ...toDetail(runDetails, null), error: 'Currents did not answer within a minute.' })).toBeNull()
+  })
+
+  test('a test is known across runs by its spec and title', async () => {
+    expect(testKeyOf({ spec: 'tests/login.spec.ts', title: ['Login', 'redirects to the dashboard after sign in'] })).toBe(
+      'tests/login.spec.ts|Login › redirects to the dashboard after sign in',
+    )
+    expect(testKeyOf({ spec: 'tests/login.spec.ts', title: ['Login', 'logs out'] })).toBe('tests/login.spec.ts|Login › logs out')
   })
 })
 
@@ -152,15 +248,15 @@ describe('words and helpers', () => {
 
   test("finds the file the engine saved a reply over its MCP output limit to, and no other", async () => {
     const path =
-      'C:\\Users\\Ada Lovelace\\.claude\\projects\\C--Users-ada\\74e20eb3\\tool-results\\mcp-3fb6525c-f3dd-4d77-ba6b-ffa7031a8a00-currents-list-pull-requests-1793498356709.txt'
+      'C:\\Users\\Ada Lovelace\\.claude\\projects\\C--Users-ada\\74e20eb3\\tool-results\\mcp-3fb6525c-f3dd-4d77-ba6b-ffa7031a8a00-currents-get-context-1793498356709.txt'
     // The engine's note, as Claude Code 2.1.314 words it.
     const note = (at: string) =>
       `Error: result (108,408 characters across 3,736 lines) exceeds maximum allowed tokens. Output has been saved to ${at}.\nFormat: Plain text\n- For targeted searches (find a line, locate a string): use grep on the file directly.`
-    expect(savedReply(note(path), 'currents-list-pull-requests')).toBe(path)
-    expect(savedReply(note(path).replace('.\n', ' and can be read in parts.\n'), 'currents-list-pull-requests')).toBe(path)
+    expect(savedReply(note(path), 'currents-get-context')).toBe(path)
+    expect(savedReply(note(path).replace('.\n', ' and can be read in parts.\n'), 'currents-get-context')).toBe(path)
     expect(savedReply(note(path), 'currents-get-runs')).toBeNull()
-    expect(savedReply(note('C:\\Users\\ada\\secrets\\currents-list-pull-requests.txt'), 'currents-list-pull-requests')).toBeNull()
-    expect(savedReply(`Output has been saved to ${path}.`, 'currents-list-pull-requests')).toBeNull()
+    expect(savedReply(note('C:\\Users\\ada\\secrets\\currents-get-context.txt'), 'currents-get-context')).toBeNull()
+    expect(savedReply(`Output has been saved to ${path}.`, 'currents-get-context')).toBeNull()
   })
 })
 
@@ -169,14 +265,14 @@ describe("the band's reads", () => {
     expect(allowRules('plugin:currents-ci:currents')).toEqual([
       'mcp__plugin_currents-ci_currents__currents-get-projects',
       'mcp__plugin_currents-ci_currents__currents-get-runs',
-      'mcp__plugin_currents-ci_currents__currents-list-pull-requests',
       'mcp__plugin_currents-ci_currents__currents-get-run-details',
       'mcp__plugin_currents-ci_currents__currents-get-context',
+      'mcp__plugin_currents-ci_currents__currents-get-tests-performance',
     ])
     expect(allowRules('plugin_currents-ci_currents')[0]).toBe('mcp__plugin_currents-ci_currents__currents-get-projects')
     expect(allowRules('claude.ai Currents')[1]).toBe('mcp__claude_ai_Currents__currents-get-runs')
     expect(allowRules('3fb6525c-f3dd-4d77-ba6b-ffa7031a8a00')[4]).toBe(
-      'mcp__3fb6525c-f3dd-4d77-ba6b-ffa7031a8a00__currents-get-context',
+      'mcp__3fb6525c-f3dd-4d77-ba6b-ffa7031a8a00__currents-get-tests-performance',
     )
   })
 })

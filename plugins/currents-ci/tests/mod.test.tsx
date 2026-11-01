@@ -3,16 +3,20 @@ import { expect, mock, test, type Engine, type MockClock } from 'claude-code/tes
 
 import {
   NOW,
-  OPEN_PRS,
+  PR_VIEW,
+  PR_VIEW_DRAFT,
   branchRuns,
   context,
   failedRun,
+  flakiestTests,
+  mainFailedRun,
+  mainRun,
   ok,
-  passedPrRun,
   projects,
-  pullRequests,
   runDetails,
   runningRun,
+  shareLink,
+  slowestTests,
 } from './fixtures'
 
 const PLUGIN = 'currents-ci'
@@ -20,7 +24,14 @@ const PLUGIN = 'currents-ci'
 const CONNECTOR = 'c0ffee00-1111-2222-3333-444455556666'
 /** The plugin's own server, as tool names spell it. */
 const OWN = 'plugin_currents-ci_currents'
-const CURRENTS_TOOLS = ['currents-get-projects', 'currents-get-runs', 'currents-get-run-details', 'currents-get-context']
+const CURRENTS_TOOLS = [
+  'currents-get-projects',
+  'currents-get-runs',
+  'currents-get-run-details',
+  'currents-get-context',
+  'currents-get-tests-performance',
+  'currents-create-share-link',
+]
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
 const SCROLL = { offset: 0, bodyRows: 40 }
 
@@ -46,11 +57,22 @@ type World = {
   ownListed: boolean
   inRepo: boolean
   branchHasRuns: boolean
+  /** The branch's newest run, which `currents-get-runs` lists first. */
   latest: unknown
+  /** The default branch's newest run; null when it has none. */
+  main: unknown
+  /** The branch's commit, as `git rev-parse HEAD` reads it. */
+  head: string
+  /** The branch's pull request, as `gh pr view` prints it; null when the branch has none. */
+  pr: string | null
+  /** Reads of the default branch fail, as a refresh that cannot reach it does. */
+  baselineFails?: boolean
   calls: string[]
   servers: string[]
   runFilters: Record<string, unknown>[]
-  prFilters: Record<string, unknown>[]
+  contextReads: Record<string, unknown>[]
+  testReads: Record<string, unknown>[]
+  shareCalls: Record<string, unknown>[]
   filled: string[]
   /** The projects the sign-in sees; the fixtures' two when absent. */
   projects?: unknown
@@ -86,10 +108,15 @@ const world = (on: On, init: Partial<World> = {}): World => {
     inRepo: true,
     branchHasRuns: true,
     latest: failedRun,
+    main: mainRun,
+    head: failedRun.meta.commit.sha,
+    pr: PR_VIEW,
     calls: [],
     servers: [],
     runFilters: [],
-    prFilters: [],
+    contextReads: [],
+    testReads: [],
+    shareCalls: [],
     filled: [],
     held: [],
     toasts: [],
@@ -163,18 +190,25 @@ const world = (on: On, init: Partial<World> = {}): World => {
       case 'currents-get-runs': {
         w.runFilters.push(e.args)
         const branches = (e.args.branches as string[] | undefined) ?? []
-        if (branches.includes('main')) return reply(ok([passedPrRun_onMain]))
+        if (branches.includes('main')) {
+          if (w.baselineFails) return { value: { content: [{ type: 'text', text: 'HTTP 503 the default branch could not be read' }], isError: true } }
+          return reply(ok(w.main === null ? [] : [w.main]))
+        }
         if (branches.length > 0 && !w.branchHasRuns) return reply(ok([]))
         const runs = branchRuns(w.latest)
         return reply({ ...runs, data: (runs.data as unknown[]).slice(0, Number(e.args.limit ?? 10)) })
       }
-      case 'currents-list-pull-requests':
-        w.prFilters.push(e.args)
-        return reply(pullRequests)
       case 'currents-get-run-details':
         return reply(runDetails)
       case 'currents-get-context':
+        w.contextReads.push(e.args)
         return reply(context)
+      case 'currents-get-tests-performance':
+        w.testReads.push(e.args)
+        return reply(e.args.order === 'duration' ? slowestTests : flakiestTests)
+      case 'currents-create-share-link':
+        w.shareCalls.push(e.args)
+        return reply(shareLink)
       default:
         return { value: { content: [{ type: 'text', text: `unknown tool ${e.tool}` }], isError: true } }
     }
@@ -187,11 +221,11 @@ const world = (on: On, init: Partial<World> = {}): World => {
     })
     if (argv.startsWith('git config user.name')) return out('Ada Lovelace\n')
     if (!w.inRepo && argv.startsWith('git')) return out('', 128)
-    if (argv.startsWith('git rev-parse')) return out('/work/web\n4f2c1d9e8a7b6c5d\n')
+    if (argv.startsWith('git rev-parse')) return out(`/work/web\n${w.head}\n`)
     if (argv.startsWith('git branch --show-current')) return out('fix-login\n')
     if (argv.startsWith('git remote get-url')) return out('git@github.com:acme/web.git\n')
     if (argv.startsWith('git grep')) return out("  projectId: 'AbC123',\n")
-    if (argv.startsWith('gh pr list')) return out(OPEN_PRS)
+    if (argv.startsWith('gh pr view')) return w.pr === null ? out('', 1) : out(w.pr)
     return out('', 1)
   })
   on('prompt.fill', ($, e) => {
@@ -199,13 +233,6 @@ const world = (on: On, init: Partial<World> = {}): World => {
     return { isFilled: true }
   })
   return w
-}
-
-/** The default branch's newest run. */
-const passedPrRun_onMain = {
-  ...passedPrRun,
-  runId: 'run-main-9',
-  meta: { ...passedPrRun.meta, pr: null, commit: { ...passedPrRun.meta.commit, branch: 'main', message: 'chore: release' } },
 }
 
 const start = async ($: Engine) => {
@@ -223,23 +250,98 @@ const currents = ($: Engine, args: string) =>
 
 const refresh = ($: Engine) => currents($, 'refresh')
 
-test('the band sums up the branch and the other PRs on every surface', async ($, on) => {
-  world(on)
+/** The `limit`s of the reads of one branch's runs, in the order the refreshes made them. */
+const limitsOn = (w: World, branch: string) =>
+  w.runFilters.filter(filter => JSON.stringify(filter.branches) === JSON.stringify([branch])).map(filter => filter.limit)
+
+test('the band names the first failure and how many are new, on every surface', async ($, on) => {
+  const w = world(on)
   await start($)
+  await w.clock?.settle()
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface })
     const line = await ui.find({ type: 'Text', text: /fix-login/ })
     expect(line?.text).toContain('3 failed, 2 flaky')
+    expect(line?.text).toContain('Login › redirects to the dashboard after sign in +4')
+    expect(line?.text).toContain('1 new')
     expect(line?.text).toContain('420 tests')
     expect(line?.text).toContain('6m 40s')
-    expect(line?.text).toContain('1 other PR')
     expect(await ui.find({ key: 'fix' })).toBeDefined()
     expect(await ui.find({ key: 'open' })).toBeDefined()
     await ui.unmount()
   }
 })
 
-test('the drawer shows the run like the dashboard, with its errors, spec files and PRs', async ($, on) => {
+test('the band names the first failure at once, and counts the new ones once main is read', async ($, on) => {
+  const w = world(on, { baselineFails: true })
+  await start($)
+  // The run's failures are read in the background after the refresh: let them land.
+  await w.clock?.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const before = await band.find({ type: 'Text', text: /fix-login/ })
+  expect(before?.text).toContain('Login › redirects to the dashboard after sign in +4')
+  expect(before?.text).not.toContain('1 new')
+
+  w.baselineFails = false
+  await refresh($)
+  expect((await band.find({ type: 'Text', text: /fix-login/ }))?.text).toContain('1 new')
+})
+
+test('a branch whose failures all fail on main too says so', async ($, on) => {
+  const w = world(on, { main: mainFailedRun })
+  await start($)
+  await w.clock?.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const line = await band.find({ type: 'Text', text: /fix-login/ })
+  expect(line?.text).toContain('failing on main too')
+  expect(line?.text).not.toContain(' new')
+
+  // Each failing row says so too.
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'tab-errors' })
+  expect(await pane.find({ type: 'Text', text: /^on main too$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^new$/ })).toBeUndefined()
+})
+
+test('a green main makes every failure new, and the drawer tags it', async ($, on) => {
+  const w = world(on)
+  await start($)
+  // The default branch's newest run is read alone, once per refresh.
+  expect(limitsOn(w, 'main')).toEqual([1])
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'tab-errors' })
+  expect(await pane.find({ type: 'Text', text: /^new$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /1 failure new on fix-login, not failing on main/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /on main too/ })).toBeUndefined()
+})
+
+test('the band says which commit a run is for only when HEAD is another commit', async ($, on) => {
+  const w = world(on)
+  await start($)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const line = async () => (await band.find({ type: 'Text', text: /fix-login/ }))?.text ?? ''
+  expect(await line()).toContain('fix-login')
+  expect(await line()).not.toContain('run for')
+
+  // Compared by the first seven characters: this HEAD is the same commit.
+  w.head = '4f2c1d9ffffffff'
+  await refresh($)
+  expect(await line()).toContain('fix-login')
+  expect(await line()).not.toContain('run for')
+
+  w.head = '0a1b2c3d4e5f6a7b'
+  await refresh($)
+  expect(await line()).toContain('run for 4f2c1d9')
+})
+
+test("the band names the branch's pull request, as a draft while it is one", async ($, on) => {
+  world(on, { pr: PR_VIEW_DRAFT })
+  await start($)
+  const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 220 }, surface: 'terminal' })
+  expect((await band.find({ type: 'Text', text: /fix-login/ }))?.text).toContain(' · PR #42 draft')
+})
+
+test('the drawer shows the run like the dashboard, with its errors, spec files and pull request', async ($, on) => {
   const w = world(on)
   await start($)
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -260,13 +362,13 @@ test('the drawer shows the run like the dashboard, with its errors, spec files a
     expect(await ui.find({ type: 'Text', text: 'Showing 3 out of 3 spec files in 2 groups' })).toBeDefined()
 
     await ui.press({ key: 'tab-prs' })
-    expect(await ui.find({ key: 'pr-github:github.com/acme/web#77' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /#80 Tweak the docs · no Currents runs yet · draft/ })).toBeDefined()
+    expect((await ui.find({ key: 'tab-prs' }))?.props.label).toBe('Pull request #42')
+    expect(await ui.find({ type: 'Text', text: /#42 Fix the login redirect loop/ })).toBeDefined()
 
     await ui.press({ key: 'tab-summary' })
     await ui.unmount()
   }
-  expect(w.calls).toContain('currents-get-context')
+  expect(w.contextReads.at(-1)).toMatchObject({ run_id: 'run-failed-1', limit: 50, include_flaky: true })
   expect(w.servers.every(server => server === CONNECTOR)).toBe(true)
 })
 
@@ -278,6 +380,133 @@ test('Fix with Claude drafts a prompt with the failures', async ($, on) => {
   expect(w.filled).toHaveLength(1)
   expect(w.filled[0]).toContain('run_id `run-failed-1`')
   expect(w.filled[0]).toContain('Login › redirects to the dashboard after sign in')
+  expect(w.filled[0]).toContain('None of the failing tests fail on main: all are new on this branch.')
+})
+
+test("the run's Share link makes a report link for the run, and copies it", async ($, on) => {
+  const w = world(on)
+  const copied: string[] = []
+  on('ui.copy', ($, e) => {
+    copied.push(e.text)
+    return { value: { isCopied: true } }
+  })
+  await start($)
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'share' })
+  expect(w.shareCalls).toEqual([{ purpose: 'report', run_id: 'run-failed-1' }])
+  expect(copied).toEqual([shareLink.pageUrl])
+  expect(w.toasts.at(-1)).toContain('Copied a link to this run')
+})
+
+test("a failing test's Share link makes a report link for that test", async ($, on) => {
+  const w = world(on)
+  const copied: string[] = []
+  on('ui.copy', ($, e) => {
+    copied.push(e.text)
+    return { value: { isCopied: true } }
+  })
+  await start($)
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'tab-errors' })
+  await pane.press({ key: 'share-t-1:i-1' })
+  expect(w.shareCalls).toEqual([{ purpose: 'report', instance_id: 'i-1', test_id: 't-1' }])
+  expect(copied).toEqual([shareLink.pageUrl])
+})
+
+test("a Share link the session's permissions refuse says so in a toast", async ($, on) => {
+  const w = world(on)
+  await start($)
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  w.denied = true
+  await pane.press({ key: 'share' })
+  expect(w.toasts.at(-1)).toContain("Could not make a link to this run: this session's permissions stopped it")
+  expect(w.shareCalls).toEqual([])
+})
+
+test("the Tests tab reads the branch's tests, flakiest first, and the slowest on request", async ($, on) => {
+  const w = world(on)
+  await start($)
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'tab-tests' })
+  expect(w.testReads.at(-1)).toMatchObject({
+    projectId: 'AbC123',
+    branches: ['fix-login'],
+    order: 'flakiness',
+    dir: 'desc',
+    min_executions: 2,
+    limit: 15,
+    date_start: '2026-09-29',
+    date_end: '2026-10-29',
+  })
+  expect(await pane.find({ type: 'Text', text: /saves the avatar/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /12\.5% flaky/ })).toBeDefined()
+
+  await pane.press({ key: 'sort-duration' })
+  expect(w.testReads.at(-1)).toMatchObject({ branches: ['fix-login'], order: 'duration' })
+  expect(await pane.find({ type: 'Text', text: /exports every order as CSV/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /avg 1m 35s/ })).toBeDefined()
+})
+
+test('Fix flaky tests with Claude, on the Tests tab, drafts the list it shows', async ($, on) => {
+  const w = world(on)
+  await start($)
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'tab-tests' })
+  await pane.press({ key: 'fix-tests' })
+  expect(w.filled).toHaveLength(1)
+  expect(w.filled[0]).toContain('These tests on branch `fix-login` were flaky in the last 30 days:')
+  expect(w.filled[0]).toContain('saves the avatar (12.5% flaky over 8 executions)')
+})
+
+test('the pull request tab shows the PR, its review, and its builds grouped by commit', async ($, on) => {
+  const w = world(on)
+  await start($)
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'tab-prs' })
+  expect(await pane.find({ type: 'Text', text: /#42 Fix the login redirect loop/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Open · fix-login → main · Approved/ })).toBeDefined()
+  expect((await pane.find({ type: 'Link', text: 'Open the pull request ↗' }))?.props.href).toBe('https://github.com/acme/web/pull/42')
+
+  // One header per commit, the newest commit first; each commit's builds follow it.
+  const commits = await pane.findAll({ type: 'Text', text: /^[0-9a-f]{7} · / })
+  expect(commits.map(commit => commit.text)).toEqual(['4f2c1d9 · Ada Lovelace · 12m ago', '7e6d5c4 · Grace Hopper · 5h ago'])
+  expect(await pane.find({ type: 'Button', text: /Failed · 3 failed · 2 flaky · 6m 40s · CI gha-991-1/ })).toBeDefined()
+  expect(w.calls).not.toContain('currents-list-pull-requests')
+})
+
+test('a branch with neither a pull request nor runs says so, and offers to open one on GitHub', async ($, on) => {
+  world(on, { branchHasRuns: false, pr: null })
+  await start($)
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'tab-prs' })
+  expect(await pane.find({ type: 'Text', text: /No pull request for fix-login yet, and no runs on it/ })).toBeDefined()
+  expect((await pane.find({ type: 'Link', text: 'Open a pull request on GitHub ↗' }))?.props.href).toBe(
+    'https://github.com/acme/web/compare/fix-login?expand=1',
+  )
+})
+
+test('a branch with no runs of its own or on main, and no pull request, offers the compare link', async ($, on) => {
+  world(on, { branchHasRuns: false, main: null, pr: null })
+  await start($)
+  // With no run to show there are no tabs: the pull request section is drawn in the body.
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await pane.find({ type: 'Text', text: /No Currents runs on fix-login yet/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /No pull request for fix-login yet, and no runs on it/ })).toBeDefined()
+  expect((await pane.find({ type: 'Link', text: 'Open a pull request on GitHub ↗' }))?.props.href).toBe(
+    'https://github.com/acme/web/compare/fix-login?expand=1',
+  )
+})
+
+test("with no pull request from GitHub, the branch's run names its pull request", async ($, on) => {
+  world(on, { pr: null })
+  await start($)
+  const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 220 }, surface: 'terminal' })
+  expect((await band.find({ type: 'Text', text: /fix-login/ }))?.text).toContain(' · PR #42')
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'tab-prs' })
+  expect((await pane.find({ key: 'tab-prs' }))?.props.label).toBe('Pull request #42')
+  expect(await pane.find({ type: 'Text', text: /#42 Fix the login redirect loop/ })).toBeDefined()
+  expect((await pane.find({ type: 'Link', text: 'Open the pull request ↗' }))?.props.href).toBe('https://github.com/acme/web/pull/42')
 })
 
 test("signed out, Sign in opens this session's MCP servers, and the band fills in once signed in", async ($, on) => {
@@ -491,12 +720,14 @@ test('a refresh that never hears back says so after a minute, and offers the rul
 })
 
 test("a reply over the engine's MCP output limit is read whole from the file the engine saved it to", async ($, on) => {
-  const w = world(on, { oversize: ['currents-get-runs', 'currents-list-pull-requests'] })
+  const w = world(on, { oversize: ['currents-get-runs', 'currents-get-context'] })
   await start($)
+  await w.clock?.settle()
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   const line = await band.find({ type: 'Text', text: /fix-login/ })
   expect(line?.text).toContain('3 failed, 2 flaky')
-  expect(line?.text).toContain('1 other PR')
+  expect(line?.text).toContain('Login › redirects to the dashboard after sign in +4')
+  expect(line?.text).toContain('1 new')
   expect(Object.keys(w.saved).length).toBeGreaterThan(1)
 })
 
@@ -519,16 +750,14 @@ test('a reply that is not JSON is quoted, and the band says how old its news is 
 test("each refresh reads the branch's newest run alone, and its history once a new run starts", async ($, on) => {
   const w = world(on)
   await start($)
-  expect(w.runFilters.map(filter => filter.limit)).toEqual([12])
-  // The PR cards leave out the timeline preview, which repeats the latest run.
-  expect(w.prFilters.every(filter => filter.runs_per_pr === 0)).toBe(true)
+  expect(limitsOn(w, 'fix-login')).toEqual([12])
 
   await refresh($)
-  expect(w.runFilters.map(filter => filter.limit)).toEqual([12, 1])
+  expect(limitsOn(w, 'fix-login')).toEqual([12, 1])
 
   w.latest = runningRun
   await refresh($)
-  expect(w.runFilters.map(filter => filter.limit)).toEqual([12, 1, 1, 12])
+  expect(limitsOn(w, 'fix-login')).toEqual([12, 1, 1, 12])
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect((await band.find({ type: 'Text', text: /fix-login/ }))?.text).toContain('Running')
 })

@@ -39,34 +39,14 @@ export type Run = {
   ciBuildId: string | null
   prNumber: string | null
   prLink: string | null
+  /** The branch the run's pull request merges into. */
+  prBase: string | null
   framework: string | null
   tags: string[]
   groups: number
   tests: TestCounts
   /** Spec files: `complete` of `total` finished, `claimed` started. */
   specs: { total: number; complete: number; claimed: number }
-}
-
-/** A run as a pull request's timeline lists it. */
-export type RecentRun = {
-  runId: string
-  createdAt: string
-  status: RunStatus
-  completionState: CompletionState
-  durationMs: number | null
-  failures: number
-  sha: string | null
-}
-
-export type PullRequest = {
-  id: string
-  number: string | null
-  title: string | null
-  link: string | null
-  source: string | null
-  destination: string | null
-  latest: Run
-  recent: RecentRun[]
 }
 
 export type FailedTest = {
@@ -108,6 +88,31 @@ export type RunDetail = {
   error: string | null
 }
 
+/** A test's numbers over the branch's recent runs, from `currents-get-tests-performance`: a row of the Tests tab. */
+export type TestStat = {
+  title: string
+  spec: string
+  executions: number
+  failures: number
+  flaky: number
+  /** A fraction: 0.12 is 12% of executions flaky. */
+  flakinessRate: number
+  avgDurationMs: number | null
+  lastSeen: string | null
+}
+
+/** The current branch's pull request, as the GitHub CLI reports it. */
+export type BranchPr = {
+  number: string
+  title: string
+  url: string
+  isDraft: boolean
+  /** `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or null without a review decision. */
+  review: string | null
+  /** The branch the PR merges into. */
+  base: string | null
+}
+
 /**
  * Whether the session has a Currents MCP server to read from: the Currents
  * connector from the Claude directory, a server in the person's MCP config, or
@@ -133,6 +138,18 @@ export type Repo = {
   slug: string | null
 }
 
+/** The current branch's test numbers, as the Tests tab lists them: flakiest or slowest first. */
+export type BranchTests = {
+  branch: string
+  sort: TestSort
+  /** When the list was read. */
+  at: number
+  list: TestStat[]
+  error: string | null
+}
+
+export type TestSort = 'flakiness' | 'duration'
+
 export type Snapshot = {
   connection: Connection
   repo: Repo | null
@@ -148,11 +165,12 @@ export type Snapshot = {
    */
   branchRuns: Run[]
   scope: 'branch' | 'mine'
-  /** The default branch's newest run, while the current branch has none. */
+  /** The default branch's newest run: the baseline the branch's failures are compared with. */
   baseRun: Run | null
-  prs: PullRequest[]
-  /** The person's open pull requests that have no Currents run yet. */
-  quietPrs: { number: string; title: string; branch: string; isDraft: boolean }[]
+  /** The current branch's pull request, when the GitHub CLI finds one. */
+  pullRequest: BranchPr | null
+  /** The Tests tab's list, for the branch, once the tab has been opened. */
+  branchTests: BranchTests | null
   /** When this session last pushed the current branch. */
   pushedAt: number | null
   updatedAt: number | null
@@ -165,13 +183,15 @@ export type Snapshot = {
   allow: string[]
 }
 
-export type Tab = 'summary' | 'errors' | 'specs' | 'prs'
+export type Tab = 'summary' | 'errors' | 'specs' | 'tests' | 'prs'
 
 export type View = {
   /** The run the drawer shows; null follows the current branch's latest. */
   runId: string | null
   tab: Tab
   isPicking: boolean
+  /** The Tests tab's order; an older view lacks it, and reads as flakiest. */
+  testSort?: TestSort
 }
 
 declare module 'claude-code' {

@@ -3,16 +3,18 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderSurface, Timer } from 'claude-code'
 
-import type { Connection, Project, PullRequest, Repo, Run, RunDetail, Snapshot, Verdict, View } from '../types'
+import type { BranchPr, Connection, Project, Repo, Run, RunDetail, Snapshot, TestSort, Verdict, View } from '../types'
 import {
   CurrentsError,
+  TEST_WINDOW_DAYS,
   allowRules,
+  createShareLink,
   discover,
   fetchDetail,
   fetchLatestRun,
   fetchProjects,
-  fetchPullRequests,
   fetchRuns,
+  fetchTestStats,
   forget,
 } from './currents'
 import {
@@ -21,11 +23,13 @@ import {
   failedCount,
   fixPrompt,
   isActive,
+  newFailures,
   outcomeSummary,
   plural,
+  testsPrompt,
   verdictOf,
 } from './model'
-import { gitUserName, mostRecent, myOpenPrs, projectIdsInRepo, readRepo, type OpenPr } from './repo'
+import { gitUserName, mostRecent, prOfBranch, projectIdsInRepo, readRepo } from './repo'
 import { EMPTY, FIRST_VIEW, NO_DETAILS, PANE, normalize } from './state'
 
 const snapshot = atom({ plugin: 'currents-ci', key: 'snapshot' } as const, EMPTY)
@@ -34,7 +38,7 @@ const view = atom({ plugin: 'currents-ci', key: 'view' } as const, FIRST_VIEW)
 
 type Engine = EngineInterface
 
-export type Options = { notifications: boolean; pullRequests: 'mine' | 'all' }
+export type Options = { notifications: boolean }
 
 const SECOND = 1000
 const MINUTE = 60 * SECOND
@@ -46,7 +50,7 @@ let inFlight: Promise<void> | null = null
 let failures = 0
 let isFirstRefresh = true
 let projectsCache: { server: string; at: number; list: Project[] } | null = null
-let openPrsCache: { root: string; at: number; list: OpenPr[] | null } | null = null
+let prCache: { root: string; branch: string; at: number; pr: BranchPr | null } | null = null
 const resolved = new Map<string, { project: Project; source: Snapshot['projectSource'] }>()
 const seen = new Map<string, Verdict>()
 const detailFetchedAt = new Map<string, number>()
@@ -54,14 +58,28 @@ const detailInFlight = new Set<string>()
 
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
-/** The run the drawer shows: the one picked, else the current branch's newest. */
+/** The run the drawer shows: the one picked, else the current branch's newest, else the default branch's. */
 export const shownRun = (s: Snapshot, v: View): Run | null => {
   if (v.runId !== null) {
-    const picked =
-      s.branchRuns.find(run => run.runId === v.runId) ?? s.prs.find(pr => pr.latest.runId === v.runId)?.latest
-    if (picked !== undefined) return picked
+    const picked = s.branchRuns.find(run => run.runId === v.runId) ?? (s.baseRun?.runId === v.runId ? s.baseRun : null)
+    if (picked !== null) return picked
   }
   return s.branchRuns[0] ?? s.baseRun ?? null
+}
+
+/**
+ * The run a branch's failures are compared with: the default branch's newest,
+ * with its details once read. Null for the default branch's own runs, which
+ * have nothing to compare with.
+ */
+export const baselineOf = (
+  s: Snapshot,
+  run: Run,
+  all: Record<string, RunDetail>,
+): { name: string; detail: RunDetail | undefined } | null => {
+  const base = s.baseRun
+  if (base === null || base.runId === run.runId) return null
+  return { name: base.branch ?? 'the default branch', detail: all[base.runId] }
 }
 
 /** Whether the current branch was pushed after its newest run started. */
@@ -70,9 +88,9 @@ export const isAwaitingRun = (s: Snapshot, now: number) =>
   now - s.pushedAt < 20 * MINUTE &&
   (s.branchRuns[0] === undefined || Date.parse(s.branchRuns[0].createdAt) < s.pushedAt - 30 * SECOND)
 
-const activeRuns = (s: Snapshot) => [s.branchRuns[0], ...s.prs.map(pr => pr.latest)].filter(
-  (run): run is Run => run !== undefined && isActive(run),
-)
+const activeRuns = (s: Snapshot) => [s.branchRuns[0]].filter((run): run is Run => run !== undefined && isActive(run))
+
+const hasFailures = (run: Run) => failedCount(run.tests) > 0 || run.tests.flaky > 0 || run.status === 'FAILED'
 
 let isLooping = false
 
@@ -156,8 +174,7 @@ async function load($: Engine, options: Options) {
         projectSource: null,
         branchRuns: [],
         baseRun: null,
-        prs: [],
-        quietPrs: [],
+        pullRequest: null,
         isLoading: false,
         error: null,
         allow: [],
@@ -171,17 +188,17 @@ async function load($: Engine, options: Options) {
     const scope = branch !== null ? 'branch' : 'mine'
     const runsFilter = branch !== null ? { branches: [branch] } : author ? { authors: [author] } : null
     const isSameList = before.project?.projectId === projectId && before.repo?.branch === branch && before.scope === scope
-    const [branchRuns, prs] = await Promise.all([
+    // The default branch's newest run is the baseline the branch's failures are compared with.
+    const baseBranch = branch !== null && defaultBranch !== null && defaultBranch !== branch ? defaultBranch : null
+    const [branchRuns, pullRequest, baseRun] = await Promise.all([
       runsFilter === null
         ? Promise.resolve([])
         : runsOf($, connection.server, projectId, runsFilter, isSameList ? before.branchRuns : []),
-      pullRequestsOf($, connection.server, projectId, repo, author, options, now),
+      pullRequestOf($, repo, now),
+      baseBranch === null
+        ? Promise.resolve(null)
+        : fetchLatestRun($, connection.server, projectId, { branches: [baseBranch] }).catch(() => null),
     ])
-    // A branch with no run yet: show how the default branch stands instead.
-    const baseRun =
-      branchRuns.length === 0 && branch !== null && defaultBranch !== null && defaultBranch !== branch
-        ? await fetchLatestRun($, connection.server, projectId, { branches: [defaultBranch] }).catch(() => null)
-        : null
     const next = await update($, snapshot, (s): Snapshot => ({
       ...s,
       connection,
@@ -193,8 +210,7 @@ async function load($: Engine, options: Options) {
       branchRuns,
       scope,
       baseRun,
-      prs: prs.cards,
-      quietPrs: prs.quiet,
+      pullRequest,
       pushedAt: s.repo?.branch === repo?.branch ? s.pushedAt : null,
       updatedAt: now,
       isLoading: false,
@@ -204,6 +220,7 @@ async function load($: Engine, options: Options) {
     failures = 0
     announce($, next, options)
     tick($, next)
+    void ensureFailures($, next).catch(() => undefined)
     if ((await $.ui.panes()).some(pane => pane.id === PANE)) {
       await ensureDetail($, shownRun(next, await read($, view)))
     }
@@ -398,51 +415,23 @@ export async function pickProject($: Engine, options: Options, project: Project)
     unseen: [],
     projectSource: 'picked',
     branchRuns: [],
-    prs: [],
-    quietPrs: [],
+    pullRequest: null,
+    branchTests: null,
     updatedAt: null,
   }))
   await refresh($, options)
   await schedule($, options)
 }
 
-// ---- Pull requests ----
+// ---- The branch's pull request ----
 
-async function pullRequestsOf(
-  $: Engine,
-  server: string,
-  projectId: string,
-  repo: Repo | null,
-  author: string | null,
-  options: Options,
-  now: number,
-): Promise<{ cards: PullRequest[]; quiet: Snapshot['quietPrs'] }> {
-  const newestFirst = (a: PullRequest, b: PullRequest) =>
-    Date.parse(b.latest.createdAt) - Date.parse(a.latest.createdAt)
-  if (options.pullRequests === 'all' || repo === null) {
-    const filter = options.pullRequests === 'mine' && author !== null ? { authors: [author] } : {}
-    return { cards: (await fetchPullRequests($, server, projectId, filter)).sort(newestFirst), quiet: [] }
+/** The checked-out branch's pull request, from the GitHub CLI, read again every two minutes. */
+async function pullRequestOf($: Engine, repo: Repo | null, now: number): Promise<BranchPr | null> {
+  if (repo === null || repo.branch === null) return null
+  if (prCache === null || prCache.root !== repo.root || prCache.branch !== repo.branch || now - prCache.at > 2 * MINUTE) {
+    prCache = { root: repo.root, branch: repo.branch, at: now, pr: await prOfBranch($, repo.root) }
   }
-  if (openPrsCache === null || openPrsCache.root !== repo.root || now - openPrsCache.at > 2 * MINUTE) {
-    openPrsCache = { root: repo.root, at: now, list: await myOpenPrs($, repo.root) }
-  }
-  const mine = openPrsCache.list
-  if (mine === null) {
-    // No GitHub CLI: the person's runs by their git author name instead.
-    const name = await gitUserName($, repo.root)
-    const cards = await fetchPullRequests($, server, projectId, name ? { authors: [name] } : {})
-    return { cards: cards.sort(newestFirst), quiet: [] }
-  }
-  const branches = [...new Set(mine.map(pr => pr.branch))]
-  if (branches.length === 0) return { cards: [], quiet: [] }
-  const cards = (await fetchPullRequests($, server, projectId, { branches })).filter(
-    card => card.source === null || branches.includes(card.source),
-  )
-  const covered = new Set(cards.map(card => card.source).concat(cards.map(card => card.latest.branch)))
-  const quiet = mine
-    .filter(pr => !covered.has(pr.branch))
-    .map(pr => ({ number: pr.number, title: pr.title, branch: pr.branch, isDraft: pr.isDraft }))
-  return { cards: cards.sort(newestFirst), quiet }
+  return prCache.pr
 }
 
 // ---- Run detail ----
@@ -481,6 +470,18 @@ export async function ensureDetail($: Engine, run: Run | null, force = false) {
   }
 }
 
+/**
+ * What the band names: the failing tests of the branch's newest run, and of the
+ * default branch's run they are compared with. A branch whose newest run is
+ * green needs neither.
+ */
+async function ensureFailures($: Engine, s: Snapshot) {
+  const latest = s.branchRuns[0]
+  if (latest === undefined || !hasFailures(latest)) return
+  await ensureDetail($, latest)
+  if (s.baseRun !== null && s.baseRun.runId !== latest.runId) await ensureDetail($, s.baseRun)
+}
+
 const keepNewest = (all: Record<string, RunDetail>, keep: string) => {
   const ids = Object.keys(all)
   if (ids.length <= MAX_DETAILS) return all
@@ -492,6 +493,29 @@ const keepNewest = (all: Record<string, RunDetail>, keep: string) => {
   const kept = all[keep]
   if (kept !== undefined) trimmed[keep] = kept
   return trimmed
+}
+
+// ---- The Tests tab ----
+
+/** The branch's flakiest or slowest tests for the Tests tab: read when the tab or its order is chosen, again after five minutes. */
+export async function ensureBranchTests($: Engine, sort: TestSort) {
+  const s = await read($, snapshot)
+  const branch = s.repo?.branch ?? null
+  if (branch === null || s.project === null || s.connection.state !== 'connected') return
+  const now = await $.clock.now()
+  const have = s.branchTests
+  if (have !== null && have.branch === branch && have.sort === sort && have.error === null && now - have.at < 5 * MINUTE) {
+    return
+  }
+  try {
+    const list = await fetchTestStats($, s.connection.server, s.project.projectId, branch, sort, now)
+    await update($, snapshot, (x): Snapshot => ({ ...x, branchTests: { branch, sort, at: now, list, error: null } }))
+  } catch (error) {
+    await update($, snapshot, (x): Snapshot => ({
+      ...x,
+      branchTests: { branch, sort, at: now, list: [], error: messageOf(error) },
+    }))
+  }
 }
 
 // ---- Connecting ----
@@ -544,43 +568,38 @@ export async function markPushed($: Engine, options: Options) {
   await schedule($, options, 10 * SECOND)
 }
 
+/** Toasts, and notifies when asked, as the branch's newest run starts, fails and ends. */
 function announce($: Engine, s: Snapshot, options: Options) {
-  // Everyone's pull requests would be noise: with `all`, only the current branch speaks up.
-  const prRuns = options.pullRequests === 'all' ? [] : s.prs.map(pr => pr.latest)
-  const watched = [s.branchRuns[0], ...prRuns].filter((run): run is Run => run !== undefined)
+  const run = s.branchRuns[0]
   const quiet = isFirstRefresh
   isFirstRefresh = false
-  for (const run of watched) {
-    const verdict = verdictOf(run)
-    const before = seen.get(run.runId)
-    seen.set(run.runId, verdict)
-    if (quiet) continue
-    const where = run.branch ?? run.title
-    if (before === undefined) {
-      if (isActive(run) && run.branch !== null && run.branch === s.repo?.branch) {
-        $.ui.toast(`● Tests started on ${where}: ${plural(run.specs.total, 'spec file')}`)
-      }
-      continue
+  if (run === undefined) return
+  const verdict = verdictOf(run)
+  const before = seen.get(run.runId)
+  seen.set(run.runId, verdict)
+  if (quiet) return
+  const where = run.branch ?? run.title
+  if (before === undefined) {
+    if (isActive(run) && run.branch !== null && run.branch === s.repo?.branch) {
+      $.ui.toast(`● Tests started on ${where}: ${plural(run.specs.total, 'spec file')}`)
     }
-    if (before === 'running' && verdict === 'failing') {
-      $.ui.toast(`● ${where} is failing: ${plural(failedCount(run.tests), 'test')} failed so far`, { timeoutMs: 8000 })
-      continue
-    }
-    if ((before === 'running' || before === 'failing') && !isActive(run)) {
-      const text = `${VERDICT[verdict].glyph} ${where} · ${outcomeSummary(run)} · ${plural(run.tests.total, 'test')} · ${duration(run.durationMs)}`
-      $.ui.toast(text, { timeoutMs: 10_000 })
-      if (options.notifications) void $.ui.notify(text, { title: 'Currents' }).catch(() => undefined)
-    }
+    return
+  }
+  if (before === 'running' && verdict === 'failing') {
+    $.ui.toast(`● ${where} is failing: ${plural(failedCount(run.tests), 'test')} failed so far`, { timeoutMs: 8000 })
+    return
+  }
+  if ((before === 'running' || before === 'failing') && !isActive(run)) {
+    const text = `${VERDICT[verdict].glyph} ${where} · ${outcomeSummary(run)} · ${plural(run.tests.total, 'test')} · ${duration(run.durationMs)}`
+    $.ui.toast(text, { timeoutMs: 10_000 })
+    if (options.notifications) void $.ui.notify(text, { title: 'Currents' }).catch(() => undefined)
   }
 }
 
 // ---- Fix with Claude ----
 
 /** Drafts the prompt in the person's box; where there is none, sends it; failing both, copies it. */
-export async function fixWithClaude($: Engine, run: Run) {
-  await ensureDetail($, run)
-  const detail = (await read($, details))[run.runId]
-  const text = fixPrompt(run, detail)
+async function sendPrompt($: Engine, text: string) {
   const filled = await $.prompt.fill({ text }).catch(() => ({ isFilled: false }))
   if (filled.isFilled) {
     $.ui.toast('The prompt is in the box below: press Enter to send it.')
@@ -591,5 +610,54 @@ export async function fixWithClaude($: Engine, run: Run) {
   } catch {
     const copied = await $.ui.copy({ text }).catch(() => ({ isCopied: false }))
     $.ui.toast(copied.isCopied ? 'Copied the fix prompt: paste it to Claude.' : 'Could not hand the prompt to Claude.')
+  }
+}
+
+/** Fix with Claude for a run: its failures, and which of them this branch alone has. */
+export async function fixWithClaude($: Engine, run: Run) {
+  await ensureDetail($, run)
+  const s = await read($, snapshot)
+  const all = await read($, details)
+  const detail = all[run.runId]
+  const baseline = baselineOf(s, run, all)
+  const fresh = detail === undefined || baseline === null ? null : newFailures(detail, baseline.detail)
+  await sendPrompt($, fixPrompt(run, detail, fresh, baseline?.name ?? null))
+}
+
+/** Fix with Claude for the branch's flaky or slow tests, as the Tests tab lists them. */
+export async function fixTestsWithClaude($: Engine) {
+  const s = await read($, snapshot)
+  const tests = s.branchTests
+  if (tests === null || tests.error !== null || tests.list.length === 0) return
+  await sendPrompt($, testsPrompt(tests.branch, tests.list, tests.sort, TEST_WINDOW_DAYS))
+}
+
+// ---- Sharing ----
+
+/**
+ * Makes a public link to a report, copies it and says so, and returns it. Only a
+ * press makes one: a link works for anyone who has it, until it expires.
+ */
+export async function shareReport(
+  $: Engine,
+  target: { run_id: string } | { instance_id: string; test_id: string },
+  what: string,
+): Promise<string | null> {
+  const s = await read($, snapshot)
+  if (s.connection.state !== 'connected') return null
+  try {
+    const link = await createShareLink($, s.connection.server, target)
+    const copied = await $.ui.copy({ text: link }).catch(() => ({ isCopied: false }))
+    $.ui.toast(
+      copied.isCopied ? `Copied a link to ${what}. It works for anyone who has it until it expires.` : `Link to ${what}: ${link}`,
+      { timeoutMs: 12_000 },
+    )
+    return link
+  } catch (error) {
+    // A refusal is the session's permissions saying no, not the band failing to read.
+    const why =
+      error instanceof CurrentsError && error.kind === 'permission' ? "this session's permissions stopped it" : messageOf(error)
+    $.ui.toast(`Could not make a link to ${what}: ${why}`, { timeoutMs: 10_000 })
+    return null
   }
 }
