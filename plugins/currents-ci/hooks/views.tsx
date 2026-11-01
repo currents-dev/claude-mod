@@ -33,7 +33,10 @@ export type Actions = {
   signIn: (surface: RenderSurface) => void
   retry: () => void
   refresh: () => void
-  toggleBand: () => void
+  /** The band's ×: hidden for this session only. */
+  hideBand: () => void
+  /** The drawer's Show the band: shown, in later sessions too. */
+  showBand: () => void
   fix: (run: Run) => void
   select: (runId: string | null) => void
   tab: (tab: Tab) => void
@@ -112,7 +115,7 @@ const otherPrs = (s: Snapshot) => {
 export const drawBand = (ui: Ui, s: Snapshot, now: number, width: number, actions: Actions): RenderElement | null => {
   const { Box, Button } = ui
   const Svg = 'Svg' in ui ? ui.Svg : null
-  const hide = <Button key="hide" plain dimColor role="dismiss" label="×" onPress={actions.toggleBand} />
+  const hide = <Button key="hide" plain dimColor role="dismiss" label="×" onPress={actions.hideBand} />
   const brand: Seg = { text: 'Currents', color: 'claude', bold: true }
 
   const row = (segs: Seg[], buttons: { labels: string[]; nodes: RenderElement[] }, chart: RenderElement | null = null) => {
@@ -896,7 +899,7 @@ const drawFooter = (ui: Ui, input: PaneInput): RenderElement => {
       {s.error !== null && s.updatedAt !== null && <Text color="warning">{`Last refresh failed: ${s.error}`}</Text>}
       <Box columnGap={2} flexWrap="wrap">
         <Text dimColor>{parts.join(' · ')}</Text>
-        {isBandHidden && <Button key="show-band" plain dimColor label="Show the band" onPress={actions.toggleBand} />}
+        {isBandHidden && <Button key="show-band" plain dimColor label="Show the band" onPress={actions.showBand} />}
       </Box>
     </Box>
   )

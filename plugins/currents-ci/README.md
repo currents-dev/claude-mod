@@ -28,6 +28,8 @@ At a Claude Code prompt in the terminal:
   waits for the run that push starts.
 - When a run on your branch or one of your pull requests finishes, you get a
   toast and a notification.
+- × hides the band for the session. `/currents band` hides it in every
+  session, and shows it again.
 
 **The drawer** (`/currents`, or Open on the band)
 
@@ -140,7 +142,7 @@ latest pull requests.
 | `/currents connect` | Looks for the Currents connector, or shows how to add it |
 | `/currents status` | Shows what the plugin found: connection, project, repository |
 | `/currents project` | Picks the project for this repository |
-| `/currents band` | Hides or shows the band |
+| `/currents band` | Hides the band in every session, or shows it again |
 
 ## Settings
 

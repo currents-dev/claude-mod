@@ -39,10 +39,17 @@ async function openPane($: Engine) {
   return opened
 }
 
-async function toggleBand($: Engine) {
-  const hidden = await update($, bandHidden, isHidden => !isHidden)
-  await $.store.set('bandHidden', hidden)
-  return hidden
+/** Hides or shows the band; `everywhere` keeps the choice for later sessions. */
+async function setBandHidden($: Engine, hidden: boolean, everywhere: boolean) {
+  await update($, bandHidden, () => hidden)
+  if (everywhere) await $.store.set('bandHidden', hidden)
+}
+
+// A desktop draws the × as its native close control: closing reads as "not
+// now", so it lasts the session, and says how to undo it.
+async function dismissBand($: Engine) {
+  await setBandHidden($, true, false)
+  $.ui.toast('Currents band hidden for this session. /currents band brings it back.')
 }
 
 async function selectRun($: Engine, runId: string | null) {
@@ -86,7 +93,8 @@ function actionsFor($: Engine, settings: Options): Actions {
     signIn: surface => void quietly(openSignIn($, surface)),
     retry: () => void quietly(retry($, settings)),
     refresh: () => void quietly(refresh($, settings).then(() => schedule($, settings))),
-    toggleBand: () => void quietly(toggleBand($)),
+    hideBand: () => void quietly(dismissBand($)),
+    showBand: () => void quietly(setBandHidden($, false, true)),
     fix: run => void quietly(fixWithClaude($, run)),
     select: runId => void quietly(selectRun($, runId)),
     tab: tab => void quietly(selectTab($, tab)),
@@ -163,8 +171,11 @@ export const register: Register = (on, options) => {
       return { text: 'Choose the project in the Currents drawer.' }
     }
     if (arg === 'band') {
-      const hidden = await toggleBand($)
-      return { text: hidden ? 'Currents band hidden. /currents band shows it again.' : 'Currents band shown.' }
+      const hidden = !(await read($, bandHidden))
+      await setBandHidden($, hidden, true)
+      return {
+        text: hidden ? 'Currents band hidden in every session. /currents band shows it again.' : 'Currents band shown.',
+      }
     }
     const opened = await openPane($)
     return {

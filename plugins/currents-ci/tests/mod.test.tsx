@@ -60,6 +60,9 @@ type World = {
   /** Currents calls hang, as one held for an approval nobody is shown, until released. */
   stalls?: boolean
   held: (() => void)[]
+  toasts: string[]
+  /** The plugin's `$.store`. */
+  stored: Record<string, unknown>
   clock?: MockClock
 }
 
@@ -81,14 +84,23 @@ const world = (on: On, init: Partial<World> = {}): World => {
     runFilters: [],
     filled: [],
     held: [],
+    toasts: [],
+    stored: {},
     ...init,
   }
   w.clock = mock.clock(on, { now: NOW })
-  mock.store(on)
+  on('store.get', ($, e) => ({ value: w.stored[e.key] }))
+  on('store.set', ($, e) => {
+    w.stored[e.key] = e.value
+    return { value: undefined }
+  })
   on('session.cwd', () => ({ value: '/work/web' }))
   on('ui.panes', () => ({ value: [] }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', ($, e) => {
+    w.toasts.push(e.text)
+    return { value: undefined }
+  })
   on('ui.notify', () => ({ value: { isSent: true, channel: 'terminal_bell' } }))
   on('command.register', () => ({ value: { command: 'currents' } }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -180,13 +192,15 @@ const start = async ($: Engine) => {
   await refresh($)
 }
 
-const refresh = ($: Engine) =>
+const currents = ($: Engine, args: string) =>
   $.command.run({
     command: 'currents',
-    args: 'refresh',
+    args,
     origin: { kind: 'composer' },
     presentation: { isFullscreen: false, columns: 120 },
   })
+
+const refresh = ($: Engine) => currents($, 'refresh')
 
 test('the band sums up the branch and the other PRs on every surface', async ($, on) => {
   world(on)
@@ -352,6 +366,28 @@ test("a repository whose project the sign-in can't see says so, and falls back t
   const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await pane.find({ type: 'Text', text: /records to AbC123, which your Currents sign-in can't see/ })).toBeDefined()
   expect(await pane.find({ key: 'project' })).toBeDefined()
+})
+
+test('× hides the band for this session and says how to bring it back; /currents band hides it in every session', async ($, on) => {
+  const w = world(on)
+  await start($)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'hide' })
+  expect(await band.find({ key: 'open' })).toBeUndefined()
+  expect(w.toasts.at(-1)).toContain('/currents band brings it back')
+  expect('bandHidden' in w.stored).toBe(false)
+
+  await currents($, 'band')
+  expect(await band.find({ key: 'open' })).toBeDefined()
+  await currents($, 'band')
+  expect(await band.find({ key: 'open' })).toBeUndefined()
+  expect(w.stored.bandHidden).toBe(true)
+
+  // The drawer's Show the band undoes that too.
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'show-band' })
+  expect(await band.find({ key: 'open' })).toBeDefined()
+  expect(w.stored.bandHidden).toBe(false)
 })
 
 test('session.start, which a reload runs again, asks for the band to be drawn afresh', async ($, on) => {
